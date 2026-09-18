@@ -29,6 +29,6 @@
          - run: |
              git config user.name "github-actions"
              git config user.email "github-actions@users.noreply.github.com"
-             git add reports cache
+             for d in reports cache; do [ -d "$d" ] && git add "$d"; done
              git diff --cached --quiet || git commit -m "자료 갱신·정기 리포트 $(date +%F)"
              git push
