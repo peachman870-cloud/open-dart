@@ -438,10 +438,10 @@ for lab in picked:
         st.error(f"{lab}: {safe_msg(e)}")
         data[lab] = pd.DataFrame()
 
-# 가치평가 지표 (기준 기간 말 종가 기준)
+# 가치평가 지표 (조회일 최근 종가 기준)
 VAL_KEYS = dart.GROUPS["가치평가"]
 PERIOD_END = {0: (12, 31), 1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
-val_end = min(dt.date(base_year, *PERIOD_END[q]), dt.date.today())
+val_end = dt.date.today()  # 가치평가(PER 등)는 조회한 날의 주가 기준 (휴장일이면 직전 거래일)
 val_src = set()
 if any(k in chosen for k in VAL_KEYS):
     for lab, d in data.items():
@@ -478,7 +478,7 @@ with tabs[0]:
         note = {0: "사업보고서", 4: "4Q = 사업보고서 연간 − 3분기 누적"}.get(q, f"{qname} 단일 분기")
         st.caption(f"{base_year}년 {qname} 기준 ({note}) · {fs}재무제표"
                    + (" · 분기 매출채권회전율·ROE·ROA는 연환산(×4), 증가율은 전년 동기 대비" if q else "")
-                   + (f" · 가치평가는 {val_end:%Y-%m-%d} 종가 기준({'·'.join(sorted(val_src))})" if val_src else "")
+                   + (f" · 가치평가는 조회일({val_end:%Y-%m-%d}) 최근 종가 기준({'·'.join(sorted(val_src))})" if val_src else "")
                    + (f" · KRX 미사용: {'인증키 없음' if not krx_key else (prices.KRX_STATUS['last'] or '해당일 자료 없음')}"
                       if val_src and "KRX" not in val_src else "")
                    + " · 지표의 ? 에 마우스를 올리면 계산 방법이 보여요")
@@ -544,7 +544,7 @@ with tabs[1]:
         vt = pd.DataFrame(val_rows).set_index("회사")
         show = vt.T.map(lambda v: fmt(v) if isinstance(v, (int, float)) else ("-" if v is None else str(v)))
         st.dataframe(show, width="stretch")
-        st.caption("PER = 종가 ÷ 직전 사업연도 공시 기본EPS (KRX 방식). PBR은 지배주주자본 ÷ 보통주 발행주식수(근사치). 적자면 PER 표시 안 함.")
+        st.caption("주가는 조회일 최근 종가(기준일 칸 참고). PER = 종가 ÷ 최근 확정 사업보고서 공시 기본EPS (KRX 방식). PBR은 지배주주자본 ÷ 보통주 발행주식수(근사치). 적자면 PER 표시 안 함.")
     if hist:
         h = pd.concat(hist)
         mode = st.segmented_control("주가 차트", ["수익률(%)", "주가(원)"], default="수익률(%)") or "수익률(%)"
