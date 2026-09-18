@@ -1,0 +1,7 @@
+.streamlit/secrets.toml
+__pycache__/
+_backup/
+_upload/
+check_result.txt
+check_log.txt
+*.pyc
