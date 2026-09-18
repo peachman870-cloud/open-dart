@@ -23,6 +23,7 @@ SESSION = requests.Session()  # 연결 재사용 (속도 향상)
 SESSION.mount("https://", requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16))
 _api_cache, _api_lock = {}, threading.Lock()
 _down_until = [0.0]
+BREAKER = True  # 웹앱: 연결 실패 시 5분간 바로 포기 / prefetch: 끄고 재시도
 API_TTL = 6 * 3600  # 같은 조회는 6시간 동안 다시 부르지 않음
 
 
@@ -32,7 +33,7 @@ def _get(key, path, **params):
     ttl = 600 if path == "list.json" else API_TTL  # 공시 목록은 10분 (미리 받은 자료는 load_cache 참고)
     if hit and time.time() - hit[0] < ttl:
         return hit[1]
-    if time.time() < _down_until[0]:  # 최근에 서버 연결이 안 됐으면 기다리지 않고 바로 포기
+    if BREAKER and time.time() < _down_until[0]:  # 최근에 서버 연결이 안 됐으면 기다리지 않고 바로 포기
         raise DartError("DART 서버에 연결할 수 없어요 (잠시 후 다시 시도)")
     params["crtfc_key"] = key
     try:

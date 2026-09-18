@@ -13,6 +13,7 @@ import streamlit as st
 from concurrent.futures import ThreadPoolExecutor
 
 import dart
+import dart_extra as dx
 import prices
 
 # ※ 속도를 위해 dart.py·prices.py 는 앱을 켤 때 한 번만 읽음 (코드를 고치면 run.bat 을 다시 실행)
@@ -398,7 +399,7 @@ if not picked:
     st.info("회사를 선택해 주세요.")
     st.stop()
 
-tabs = st.tabs(["재무지표 비교", "주가·가치평가", "공시", "정기 리포트"])
+tabs = st.tabs(["재무지표 비교", "주가·가치평가", "공시", "정기 리포트", "상세 공시정보"])
 QUARTERS = {"연간": 0, "1Q": 1, "2Q": 2, "3Q": 3, "4Q": 4}
 with tabs[0]:
     c1, c2, c3 = st.columns([len(years), 5, 2.2], gap="medium")
@@ -585,6 +586,107 @@ with tabs[3]:
     else:
         f = st.selectbox("날짜", files, format_func=lambda p: p.stem)
         st.markdown(f.read_text(encoding="utf-8"))
+
+# ================= 5. 상세 공시정보 (OpenDartReader 기능) =================
+@st.cache_data(ttl=3600, show_spinner="DART에서 불러오는 중...")
+def dx_call(fn, *a):
+    return getattr(dx, fn)(key, *a)
+
+
+@st.cache_data(ttl=3600, show_spinner="DART 웹페이지 읽는 중...")
+def dx_web(fn, rcept_no):
+    return getattr(dx, fn)(rcept_no)
+
+
+def show_df(df, empty="조회된 자료가 없어요."):
+    if df is None or df.empty:
+        st.info(empty)
+        return
+    cfg = {c: st.column_config.LinkColumn(c, display_text="열기") for c in df.columns if c in ("링크",)}
+    st.dataframe(df, width="stretch", hide_index=True, column_config=cfg)
+    st.download_button("CSV 받기", df.to_csv(index=False).encode("utf-8-sig"), file_name="dart_data.csv",
+                       key=f"csv_{id(df)}_{len(df)}")
+
+
+with tabs[4]:
+    st.caption("OpenDART에서 제공하는 상세 정보를 조회해요. 버튼을 눌러야 조회해서 앱 속도에 영향이 없어요.")
+    one = st.selectbox("회사", picked, key="dx_corp") if picked else None
+    cc = lab2code.get(one) if one else None
+    sec = st.radio("항목", ["기업개황", "사업보고서 항목", "주요사항보고", "증권신고서", "지분공시",
+                           "공시 검색(전체 기업)", "공시 원문·첨부"], horizontal=True, key="dx_sec")
+    today = dt.date.today()
+    try:
+        if sec == "기업개황" and cc:
+            if st.button("조회", key="b_co"):
+                info = dart.company(key, cc)
+                show = {dx.COLS.get(k, k): v for k, v in info.items() if k not in ("status", "message")}
+                st.dataframe(pd.DataFrame(show.items(), columns=["항목", "내용"]), hide_index=True, width="stretch")
+        elif sec == "사업보고서 항목" and cc:
+            a, b, c = st.columns([3, 1.2, 1.5])
+            item = a.selectbox("항목 (28종)", list(dx.REPORT_MAP), key="dx_ri")
+            yy = b.selectbox("사업연도", list(range(today.year, 2014, -1)), index=1, key="dx_ry")
+            rn = c.selectbox("보고서", list(dx.REPORT_CODES), key="dx_rc")
+            if st.button("조회", key="b_rep"):
+                show_df(dx_call("report", cc, item, yy, dx.REPORT_CODES[rn]))
+        elif sec == "주요사항보고" and cc:
+            a, b, c = st.columns([3, 1.5, 1.5])
+            item = a.selectbox("항목 (36종)", list(dx.EVENT_MAP), key="dx_ei")
+            bgn = b.date_input("시작일", today - dt.timedelta(days=365 * 3), key="dx_eb")
+            end = c.date_input("종료일", today, key="dx_ee")
+            if st.button("조회", key="b_ev"):
+                show_df(dx_call("event", cc, item, f"{bgn:%Y%m%d}", f"{end:%Y%m%d}"))
+        elif sec == "증권신고서" and cc:
+            a, b, c = st.columns([3, 1.5, 1.5])
+            item = a.selectbox("항목", list(dx.REGSTATE_MAP), key="dx_si")
+            bgn = b.date_input("시작일", today - dt.timedelta(days=365 * 3), key="dx_sb")
+            end = c.date_input("종료일", today, key="dx_se")
+            if st.button("조회", key="b_rs"):
+                show_df(dx_call("regstate", cc, item, f"{bgn:%Y%m%d}", f"{end:%Y%m%d}"))
+        elif sec == "지분공시" and cc:
+            kind_ = st.radio("종류", ["대량보유 상황보고(5% 이상)", "임원·주요주주 소유보고"], horizontal=True, key="dx_mk")
+            if st.button("조회", key="b_ms"):
+                show_df(dx_call("major_shareholders" if kind_.startswith("대량") else "exec_shareholders", cc))
+        elif sec == "공시 검색(전체 기업)":
+            a, b, c, d = st.columns([1.5, 1.5, 1.5, 2])
+            bgn = a.date_input("시작일", today - dt.timedelta(days=7), key="dx_lb")
+            end = b.date_input("종료일", today, key="dx_le")
+            kn = c.selectbox("공시유형", list(dx.KIND), key="dx_lk")
+            who = d.text_input("제출인 (선택, 예: 국민연금공단)", key="dx_lw")
+            only = st.checkbox("선택한 회사만", value=False, key="dx_lo")
+            st.caption("전체 기업 검색은 기간이 최대 3개월이에요. 최대 1,000건까지 보여줘요.")
+            if st.button("검색", key="b_ls"):
+                df = dx_call("search", f"{bgn:%Y%m%d}", f"{end:%Y%m%d}", dx.KIND[kn], cc if only else None)
+                show_df(dx.by_presenter(df, who.strip()))
+        elif sec == "공시 원문·첨부":
+            rno = st.text_input("접수번호 (14자리, 공시 탭·검색 결과의 접수번호)", key="dx_rno").strip()
+            if rno and not (rno.isdigit() and len(rno) == 14):
+                st.warning("접수번호는 숫자 14자리예요.")
+            elif rno:
+                st.markdown(f"[DART에서 원문 보기]({dart.VIEWER}{rno})")
+                w = st.radio("보기", ["원문 텍스트", "하위 문서(목차)", "첨부 문서", "첨부 파일", "원문·XBRL 파일 받기"],
+                             horizontal=True, key="dx_w")
+                if st.button("조회", key="b_doc"):
+                    if w == "원문 텍스트":
+                        txt = dx_call("document_text", rno)
+                        st.text_area("원문", txt[:50000], height=500)
+                        st.download_button("텍스트 받기", txt.encode("utf-8"), file_name=f"{rno}.txt")
+                    elif w == "하위 문서(목차)":
+                        show_df(dx_web("sub_docs", rno))
+                    elif w == "첨부 문서":
+                        show_df(dx_web("attach_docs", rno))
+                    elif w == "첨부 파일":
+                        show_df(dx_web("attach_files", rno))
+                    else:
+                        c1, c2 = st.columns(2)
+                        c1.download_button("원문 zip 받기", dx_call("document_zip", rno), file_name=f"{rno}_원문.zip")
+                        try:
+                            c2.download_button("재무제표 XBRL zip 받기", dx_call("xbrl_zip", rno), file_name=f"{rno}_xbrl.zip")
+                        except Exception as e:
+                            c2.info(f"XBRL 없음: {safe_msg(e)}")
+        elif not cc:
+            st.info("위에서 회사를 먼저 선택해 주세요.")
+    except Exception as e:
+        st.error(safe_msg(e))
 
 # ================= 엑셀 (헤더 버튼) =================
 raw_x = long.assign(분기=qname) if not long.empty else long

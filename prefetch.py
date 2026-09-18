@@ -51,10 +51,20 @@ def find_companies(corps):
 ERRORS = []
 
 
+dart.BREAKER = False  # 미리 받기는 연결이 끊겨도 포기하지 않고 재시도
+
+
 def safe(f, *a, **kw):
-    try:
-        return f(*a, **kw)
-    except Exception as e:
+    for i in range(3):  # 시간 초과면 잠시 쉬었다가 최대 3번 시도
+        try:
+            return f(*a, **kw)
+        except Exception as e:
+            err = e
+            if "연결할 수 없" not in str(e):
+                break
+            time.sleep(3 * (i + 1))
+    e = err
+    if True:
         if len(ERRORS) < 30:
             ERRORS.append(f"{getattr(f, '__name__', f)} {a[1:] if a else ''} {kw.get('corp_code', '')}: {e}")
         return None
@@ -79,7 +89,8 @@ def fetch_company(item):
     safe(prices.history, sc, 365, GOV)
     DONE[0] += 1
     if DONE[0] % 15 == 0:  # 중간 저장 (시간 초과로 끊겨도 받은 자료는 남음)
-        safe(dart.dump_cache, OUT / "dart.json.gz")
+        with dart._api_lock:
+            safe(dart.dump_cache, OUT / "dart.json.gz")
         print(f"  {DONE[0]}개 회사 완료", flush=True)
 
 
@@ -100,8 +111,13 @@ def main():
     if not KEY:
         raise SystemExit("DART_API_KEY 가 없어요")
     OUT.mkdir(exist_ok=True)
-    corps = dart.load_corp_codes(KEY)
-    corps.to_csv(OUT / "corps.csv", index=False)
+    try:
+        corps = dart.load_corp_codes(KEY)
+        corps.to_csv(OUT / "corps.csv", index=False)
+    except Exception as e:  # 회사 목록을 못 받으면 지난번 목록 사용
+        import pandas as pd
+        print(f"회사 목록 다운로드 실패({type(e).__name__}) → 지난 목록 사용", flush=True)
+        corps = pd.read_csv(OUT / "corps.csv", dtype=str)
     comp = find_companies(corps)
     # 지난번에 받은 자료 재사용: 지난 연도 보고서는 바뀌지 않으므로 다시 받지 않고, 최근 2년만 새로 받음
     n0 = dart.load_cache(OUT / "dart.json.gz", valid_hours=24 * 3650)
@@ -110,7 +126,7 @@ def main():
         dart._api_cache.pop(k, None)
     print(f"회사 {len(comp)}개 · 연도 {YEARS.start}~{YEARS.stop - 1} · 기존 자료 {n0}건 재사용", flush=True)
     t0 = time.time()
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=3) as ex:  # DART 서버 부담을 줄이려고 3개씩
         list(ex.map(fetch_company, comp.items()))
     ends = [dt.date(y, m, dd) for y in range(Y - 3, Y + 1) for m, dd in ((3, 31), (6, 30), (9, 30), (12, 31))]
     fetch_krx([d for d in ends if d <= TODAY] + [TODAY - dt.timedelta(days=1), TODAY])
@@ -122,4 +138,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        msg = f"{TODAY} · 실패: {type(e).__name__}: {str(e)[:300]}"
+        print(msg)
+        traceback.print_exc()
+        (OUT / "prefetch_log.txt").write_text(msg, encoding="utf-8")
