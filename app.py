@@ -51,10 +51,14 @@ def secret(name):
     return v or os.environ.get(name, "")
 
 
+# 미리 받아둔 자료 폴더: 앱 폴더의 cache, 없으면 한 단계 위(저장소 맨 위)의 cache
+CACHE = next((p for p in (ROOT / "cache", ROOT.parent / "cache") if p.exists()), ROOT / "cache")
+
+
 @st.cache_resource(show_spinner="미리 받아둔 자료 불러오는 중...")
 def load_prefetched():
     """GitHub가 매일 새벽 받아둔 자료(cache 폴더)를 불러옴 → 서버 조회가 거의 없어져 빨라짐"""
-    return dart.load_cache(ROOT / "cache" / "dart.json.gz"), prices.load_cache(ROOT / "cache" / "prices.json.gz")
+    return dart.load_cache(CACHE / "dart.json.gz"), prices.load_cache(CACHE / "prices.json.gz")
 
 
 load_prefetched()
@@ -62,7 +66,7 @@ load_prefetched()
 
 @st.cache_data(ttl=86400, show_spinner="회사 목록 불러오는 중...")
 def corp_list(key):
-    f = ROOT / "cache" / "corps.csv"
+    f = CACHE / "corps.csv"
     if f.exists() and (dt.datetime.now().timestamp() - f.stat().st_mtime) < 7 * 86400:
         try:
             return pd.read_csv(f, dtype=str)
