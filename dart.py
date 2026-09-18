@@ -22,6 +22,7 @@ import time
 SESSION = requests.Session()  # 연결 재사용 (속도 향상)
 SESSION.mount("https://", requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16))
 _api_cache, _api_lock = {}, threading.Lock()
+_down_until = [0.0]
 API_TTL = 6 * 3600  # 같은 조회는 6시간 동안 다시 부르지 않음
 
 
@@ -31,9 +32,16 @@ def _get(key, path, **params):
     ttl = 600 if path == "list.json" else API_TTL  # 공시 목록은 10분 (미리 받은 자료는 load_cache 참고)
     if hit and time.time() - hit[0] < ttl:
         return hit[1]
+    if time.time() < _down_until[0]:  # 최근에 서버 연결이 안 됐으면 기다리지 않고 바로 포기
+        raise DartError("DART 서버에 연결할 수 없어요 (잠시 후 다시 시도)")
     params["crtfc_key"] = key
-    r = SESSION.get(f"{BASE}/{path}", params=params, timeout=30)
-    r.raise_for_status()
+    try:
+        r = SESSION.get(f"{BASE}/{path}", params=params, timeout=(5, 20))
+        r.raise_for_status()
+    except requests.RequestException as e:  # 오류 문구에 인증키가 담긴 주소가 보이지 않게 함
+        if isinstance(e, (requests.ConnectionError, requests.Timeout)):
+            _down_until[0] = time.time() + 300
+        raise DartError("DART 서버에 연결할 수 없어요 (시간 초과)") from None
     d = r.json()
     status = d.get("status")
     if status == "013":  # 조회된 데이터 없음

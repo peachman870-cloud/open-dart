@@ -229,6 +229,15 @@ def html_table(rows, companies, markets=None):
             f"<tbody>{''.join(body)}</tbody></table></div>")
 
 
+def safe_msg(e):
+    """오류 문구에서 인증키·주소를 지우고 짧게"""
+    import re as _re
+    s = _re.sub(r"(crtfc_key|serviceKey|AUTH_KEY)=[^&\s']+", r"\1=***", str(e))
+    if "timed out" in s or "Max retries" in s or "Connection" in s:
+        return "서버에 연결할 수 없어요 (시간 초과). 잠시 후 다시 시도해 주세요."
+    return s[:200]
+
+
 def _safe(f, *a):
     try:
         return f(*a)
@@ -327,7 +336,7 @@ if not key:
 try:
     corps = corp_list(key)
 except Exception as e:
-    st.error(f"회사 목록을 못 불러왔어요: {e}")
+    st.error(f"회사 목록을 못 불러왔어요: {safe_msg(e)}")
     st.stop()
 
 name2row = {r.corp_name: r for r in corps.itertuples()}
@@ -425,7 +434,7 @@ for lab in picked:
     try:
         data[lab] = fin(key, lab2code[lab], (base_year,), q, fs)
     except Exception as e:
-        st.error(f"{lab}: {e}")
+        st.error(f"{lab}: {safe_msg(e)}")
         data[lab] = pd.DataFrame()
 
 # 가치평가 지표 (기준 기간 말 종가 기준)
@@ -510,7 +519,7 @@ with tabs[1]:
         try:
             ph, src = price_hist(code, period, gov_key)
         except Exception as e:
-            st.error(f"{name} 주가: {e}")
+            st.error(f"{name} 주가: {safe_msg(e)}")
             continue
         if ph.empty:
             st.warning(f"{name}: 주가 데이터를 못 받았어요.")
@@ -554,7 +563,7 @@ with tabs[2]:
         try:
             parts.append(disc(key, lab2code[lab], bgn.strftime("%Y%m%d"), end.strftime("%Y%m%d")))
         except Exception as e:
-            st.error(f"{lab}: {e}")
+            st.error(f"{lab}: {safe_msg(e)}")
     parts = [p for p in parts if not p.empty]
     if parts:
         dis = pd.concat(parts)
