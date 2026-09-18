@@ -60,7 +60,13 @@ def safe(f, *a, **kw):
         return None
 
 
+DONE = [0]
+DEADLINE = time.time() + 150 * 60  # 2시간 30분이 지나면 받은 것까지만 저장하고 끝냄
+
+
 def fetch_company(item):
+    if time.time() > DEADLINE:
+        return
     cc, sc = item
     safe(dart.company, KEY, cc)
     for y in YEARS:
@@ -71,7 +77,10 @@ def fetch_company(item):
                 safe(dart.shares, KEY, cc, y, rc)
         safe(dart.dividend, KEY, cc, y)
     safe(prices.history, sc, 365, GOV)
-    time.sleep(0.2)
+    DONE[0] += 1
+    if DONE[0] % 15 == 0:  # 중간 저장 (시간 초과로 끊겨도 받은 자료는 남음)
+        safe(dart.dump_cache, OUT / "dart.json.gz")
+        print(f"  {DONE[0]}개 회사 완료", flush=True)
 
 
 def fetch_krx(dates):
@@ -94,9 +103,14 @@ def main():
     corps = dart.load_corp_codes(KEY)
     corps.to_csv(OUT / "corps.csv", index=False)
     comp = find_companies(corps)
-    print(f"회사 {len(comp)}개 · 연도 {YEARS.start}~{YEARS.stop - 1}")
+    # 지난번에 받은 자료 재사용: 지난 연도 보고서는 바뀌지 않으므로 다시 받지 않고, 최근 2년만 새로 받음
+    n0 = dart.load_cache(OUT / "dart.json.gz", valid_hours=24 * 3650)
+    recent = {str(Y), str(Y - 1)}
+    for k in [k for k in dart._api_cache if dict(k[1]).get("bsns_year") in recent or k[0] in ("company.json",)]:
+        dart._api_cache.pop(k, None)
+    print(f"회사 {len(comp)}개 · 연도 {YEARS.start}~{YEARS.stop - 1} · 기존 자료 {n0}건 재사용", flush=True)
     t0 = time.time()
-    with ThreadPoolExecutor(max_workers=4) as ex:  # DART 과부하 방지로 4개씩
+    with ThreadPoolExecutor(max_workers=6) as ex:
         list(ex.map(fetch_company, comp.items()))
     ends = [dt.date(y, m, dd) for y in range(Y - 3, Y + 1) for m, dd in ((3, 31), (6, 30), (9, 30), (12, 31))]
     fetch_krx([d for d in ends if d <= TODAY] + [TODAY - dt.timedelta(days=1), TODAY])

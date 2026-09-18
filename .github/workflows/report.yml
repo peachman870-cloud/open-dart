@@ -8,7 +8,7 @@ permissions:
 jobs:
   report:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -31,4 +31,5 @@ jobs:
           git config user.email "github-actions@users.noreply.github.com"
           for d in reports cache; do [ -d "$d" ] && git add "$d"; done
           git diff --cached --quiet || git commit -m "자료 갱신·정기 리포트 $(date +%F)"
+          git pull --rebase -X theirs || true
           git push
