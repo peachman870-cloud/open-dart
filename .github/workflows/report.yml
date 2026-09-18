@@ -1,0 +1,34 @@
+   name: DART 정기 리포트
+   on:
+     schedule:
+       - cron: "0 20 * * *"   # 매일 오전 5시 (한국시간) — 자료 미리 받기 + 리포트
+     workflow_dispatch:        # 수동 실행 버튼
+   permissions:
+     contents: write
+   jobs:
+     report:
+       runs-on: ubuntu-latest
+       timeout-minutes: 60
+       steps:
+         - uses: actions/checkout@v4
+         - uses: actions/setup-python@v5
+           with:
+             python-version: "3.11"
+         - run: pip install pandas requests
+         - name: 자료 미리 받기 (앱 속도 향상)
+           run: python prefetch.py
+           continue-on-error: true
+           env:
+             DART_API_KEY: ${{ secrets.DART_API_KEY }}
+             KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+             DATA_GO_KR_KEY: ${{ secrets.DATA_GO_KR_KEY }}
+         - name: 정기 리포트
+           run: python report.py
+           env:
+             DART_API_KEY: ${{ secrets.DART_API_KEY }}
+         - run: |
+             git config user.name "github-actions"
+             git config user.email "github-actions@users.noreply.github.com"
+             git add reports cache
+             git diff --cached --quiet || git commit -m "자료 갱신·정기 리포트 $(date +%F)"
+             git push
