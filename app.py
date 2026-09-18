@@ -479,6 +479,8 @@ with tabs[0]:
         st.caption(f"{base_year}년 {qname} 기준 ({note}) · {fs}재무제표"
                    + (" · 분기 매출채권회전율·ROE·ROA는 연환산(×4), 증가율은 전년 동기 대비" if q else "")
                    + (f" · 가치평가는 {val_end:%Y-%m-%d} 종가 기준({'·'.join(sorted(val_src))})" if val_src else "")
+                   + (f" · KRX 미사용: {'인증키 없음' if not krx_key else (prices.KRX_STATUS['last'] or '해당일 자료 없음')}"
+                      if val_src and "KRX" not in val_src else "")
                    + " · 지표의 ? 에 마우스를 올리면 계산 방법이 보여요")
         if q and any(k in chosen for k in ("재고자산회전율(회)", "재고자산회전일수(일)")):
             st.info("재고자산회전율(분기) 환산 방법: 최근 4개 분기 매출원가 합계 ÷ 평균 재고자산 "

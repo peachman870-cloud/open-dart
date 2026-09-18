@@ -15,20 +15,27 @@ NAVER_URL = "https://fchart.stock.naver.com/sise.nhn"
 KRX_URL = "https://data-dbg.krx.co.kr/svc/apis/sto/"
 _S = requests.Session()
 _krx_cache = {}
+KRX_STATUS = {"last": ""}  # 마지막 KRX 실패 이유 (화면 표시용)
 
 
 def _krx_day(day, krx_key):
     """해당일 전 종목 시세 (유가증권 + 코스닥). 휴장일이면 빈 표"""
     ck = day.strftime("%Y%m%d")
     if ck not in _krx_cache:
-        rows = []
+        rows, ok = [], True
         for svc in ("stk_bydd_trd", "ksq_bydd_trd"):  # 유가증권, 코스닥
             try:
-                r = _S.get(KRX_URL + svc, params={"basDd": ck}, headers={"AUTH_KEY": krx_key}, timeout=30)
+                r = _S.get(KRX_URL + svc, params={"basDd": ck}, headers={"AUTH_KEY": krx_key}, timeout=(5, 30))
                 if r.status_code == 200:
                     rows += r.json().get("OutBlock_1", [])
-            except Exception:
-                pass
+                else:
+                    ok = False
+                    KRX_STATUS["last"] = f"KRX 응답 {r.status_code} (인증키·이용신청 확인)"
+            except Exception as e:
+                ok = False
+                KRX_STATUS["last"] = f"KRX 연결 실패 ({type(e).__name__})"
+        if not ok and not rows:
+            return pd.DataFrame()  # 실패는 저장하지 않음 (다음에 다시 시도)
         _krx_cache[ck] = pd.DataFrame(rows)
     return _krx_cache[ck]
 
@@ -118,7 +125,8 @@ def load_cache(file, valid_hours=36):
             df["날짜"] = pd.to_datetime(df["날짜"])
             _hist_cache[(code, days, gov)] = (ts, (df, src))
     for day, recs in d.get("krx", {}).items():
-        _krx_cache.setdefault(day, pd.DataFrame(recs))
+        if recs:  # 빈 자료(받기 실패)는 불러오지 않음
+            _krx_cache.setdefault(day, pd.DataFrame(recs))
     return len(d.get("hist", []))
 
 
