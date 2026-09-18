@@ -85,8 +85,23 @@ def _naver(stock_code, days):
     return pd.DataFrame(recs)
 
 
+_hist_cache = {}
+
+
 def history(stock_code, days=365, gov_key=""):
-    """(주가 표, 출처)"""
+    """(주가 표, 출처) — 1시간 동안 같은 조회 재사용"""
+    import time
+    ck = (stock_code, days, bool(gov_key))
+    hit = _hist_cache.get(ck)
+    if hit and time.time() - hit[0] < 3600:
+        return hit[1]
+    res = _history(stock_code, days, gov_key)
+    if not res[0].empty:
+        _hist_cache[ck] = (time.time(), res)
+    return res
+
+
+def _history(stock_code, days=365, gov_key=""):
     if gov_key:
         try:
             df = _gov(stock_code, days, gov_key)

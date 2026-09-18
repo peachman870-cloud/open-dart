@@ -204,6 +204,19 @@ def html_table(rows, companies, markets=None):
             f"<tbody>{''.join(body)}</tbody></table></div>")
 
 
+def _safe(f, *a):
+    try:
+        return f(*a)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def excel_cached(sheets, footer):
+    """같은 화면이면 엑셀 파일을 다시 만들지 않음"""
+    return excel_bytes(sheets, footer)
+
+
 def excel_bytes(sheets, footer=None):
     """엑셀 양식: 1행·A열 공란 · D3 틀고정 · 눈금선 없음 · 숫자 쉼표 · 음수 빨간색 · 헤더 가운데+연회색 · 원자료 C열 회사명"""
     from openpyxl.styles import Alignment, Font, PatternFill
@@ -452,6 +465,20 @@ val_rows = []
 with tabs[1]:
     period = st.select_slider("주가 기간", [90, 180, 365, 730, 1095], value=365,
                               format_func=lambda d: f"{d // 365}년" if d >= 365 else f"{d}일")
+    # 주가·재무 자료를 여러 회사 동시에 미리 불러오기 (속도 향상)
+    def _warm2(lab):
+        code, cc = lab.split("(")[-1].rstrip(")"), lab2code[lab]
+        for job in (lambda: prices.history(code, period, gov_key),
+                    lambda: dart.financials(key, cc, (this_year - 2, this_year - 1), 0),
+                    lambda: dart.shares(key, cc, this_year - 1),
+                    lambda: dart.dividend(key, cc, this_year - 1),
+                    lambda: dart.basic_eps(key, cc, dart.eps_year_for(dt.date.today()))):
+            try:
+                job()
+            except Exception:
+                pass
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(_warm2, picked))
     hist = []
     for lab in picked:
         code, name = lab.split("(")[-1].rstrip(")"), lab.split(" (")[0]
@@ -495,6 +522,8 @@ with tabs[2]:
     only_imp = st.checkbox("중요 공시만 보기 (증자·전환사채·최대주주 변경·소송 등)")
     end = dt.date.today()
     bgn = end - dt.timedelta(days=days)
+    with ThreadPoolExecutor(max_workers=8) as ex:  # 공시 동시 조회
+        list(ex.map(lambda l: _safe(dart.disclosures, key, lab2code[l], bgn.strftime("%Y%m%d"), end.strftime("%Y%m%d")), picked))
     parts = []
     for lab in picked:
         try:
@@ -526,7 +555,7 @@ with tabs[3]:
 # ================= 엑셀 (헤더 버튼) =================
 raw_x = long.assign(분기=qname) if not long.empty else long
 sheets = {"지표비교": table, "원자료": raw_x, "가치평가": val_df, "공시": dis}
-dl_slot.download_button("엑셀 받기", excel_bytes(sheets, f"기준: {base_year}년 {qname} · {fs}재무제표"),
+dl_slot.download_button("엑셀 받기", excel_cached(sheets, f"기준: {base_year}년 {qname} · {fs}재무제표"),
                         file_name=f"상장사분석_{base_year}년_{qname}_{dt.date.today():%Y%m%d}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         width="stretch")

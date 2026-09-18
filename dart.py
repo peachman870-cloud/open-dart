@@ -28,7 +28,8 @@ API_TTL = 6 * 3600  # 같은 조회는 6시간 동안 다시 부르지 않음
 def _get(key, path, **params):
     ck = (path, tuple(sorted(params.items())))
     hit = _api_cache.get(ck)
-    if hit and time.time() - hit[0] < API_TTL:
+    ttl = 600 if path == "list.json" else API_TTL  # 공시 목록은 10분
+    if hit and time.time() - hit[0] < ttl:
         return hit[1]
     params["crtfc_key"] = key
     r = SESSION.get(f"{BASE}/{path}", params=params, timeout=30)
