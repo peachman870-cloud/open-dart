@@ -58,7 +58,13 @@ CACHE = next((p for p in (ROOT / "cache", ROOT.parent / "cache") if p.exists()),
 @st.cache_resource(show_spinner="미리 받아둔 자료 불러오는 중...")
 def load_prefetched():
     """GitHub가 매일 새벽 받아둔 자료(cache 폴더)를 불러옴 → 서버 조회가 거의 없어져 빨라짐"""
-    return dart.load_cache(CACHE / "dart.json.gz"), prices.load_cache(CACHE / "prices.json.gz")
+    out = []
+    for mod, f in ((dart, "dart.json.gz"), (prices, "prices.json.gz")):
+        try:
+            out.append(mod.load_cache(CACHE / f))
+        except Exception:  # 파일이 없거나 코드가 옛 버전이면 그냥 실시간 조회
+            out.append(0)
+    return tuple(out)
 
 
 load_prefetched()
