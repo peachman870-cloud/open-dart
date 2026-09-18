@@ -13,6 +13,7 @@ import requests
 GOV_URL = "https://apis.data.go.kr/1160100/service/GetStockSecuritiesInfoService/getStockPriceInfo"
 NAVER_URL = "https://fchart.stock.naver.com/sise.nhn"
 KRX_URL = "https://data-dbg.krx.co.kr/svc/apis/sto/"
+_S = requests.Session()
 _krx_cache = {}
 
 
@@ -23,7 +24,7 @@ def _krx_day(day, krx_key):
         rows = []
         for svc in ("stk_bydd_trd", "ksq_bydd_trd"):  # 유가증권, 코스닥
             try:
-                r = requests.get(KRX_URL + svc, params={"basDd": ck}, headers={"AUTH_KEY": krx_key}, timeout=30)
+                r = _S.get(KRX_URL + svc, params={"basDd": ck}, headers={"AUTH_KEY": krx_key}, timeout=30)
                 if r.status_code == 200:
                     rows += r.json().get("OutBlock_1", [])
             except Exception:
@@ -84,8 +85,57 @@ def _naver(stock_code, days):
     return pd.DataFrame(recs)
 
 
+_hist_cache = {}
+
+
+def dump_cache(file, codes=None):
+    """주가 이력·KRX 일별 시세를 파일로 저장. codes: 저장할 종목코드(없으면 전체)"""
+    import gzip, json
+    hist = [[k[0], k[1], k[2], v[1][0].assign(날짜=v[1][0]["날짜"].dt.strftime("%Y-%m-%d")).to_dict("records"), v[1][1]]
+            for k, v in _hist_cache.items()]
+    krx = {}
+    for day, df in _krx_cache.items():
+        if not df.empty and codes is not None:
+            df = df[df["ISU_CD"].isin(codes)]
+        krx[day] = df.to_dict("records")
+    raw = json.dumps({"hist": hist, "krx": krx}, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    with open(file, "wb") as f, gzip.GzipFile(fileobj=f, mode="wb", mtime=0) as g:
+        g.write(raw)
+    return len(hist), len(krx)
+
+
+def load_cache(file, valid_hours=36):
+    import gzip, json, time
+    try:
+        with gzip.open(file, "rb") as g:
+            d = json.loads(g.read().decode("utf-8"))
+    except Exception:
+        return 0
+    ts = time.time() - 3600 + valid_hours * 3600
+    for code, days, gov, recs, src in d.get("hist", []):
+        df = pd.DataFrame(recs)
+        if not df.empty:
+            df["날짜"] = pd.to_datetime(df["날짜"])
+            _hist_cache[(code, days, gov)] = (ts, (df, src))
+    for day, recs in d.get("krx", {}).items():
+        _krx_cache.setdefault(day, pd.DataFrame(recs))
+    return len(d.get("hist", []))
+
+
 def history(stock_code, days=365, gov_key=""):
-    """(주가 표, 출처)"""
+    """(주가 표, 출처) — 1시간 동안 같은 조회 재사용"""
+    import time
+    ck = (stock_code, days, bool(gov_key))
+    hit = _hist_cache.get(ck)
+    if hit and time.time() - hit[0] < 3600:
+        return hit[1]
+    res = _history(stock_code, days, gov_key)
+    if not res[0].empty:
+        _hist_cache[ck] = (time.time(), res)
+    return res
+
+
+def _history(stock_code, days=365, gov_key=""):
     if gov_key:
         try:
             df = _gov(stock_code, days, gov_key)

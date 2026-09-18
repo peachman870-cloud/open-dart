@@ -10,14 +10,12 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-import importlib
+from concurrent.futures import ThreadPoolExecutor
 
 import dart
 import prices
 
-# 코드 파일(dart.py, prices.py)을 고쳤을 때 앱을 다시 켜지 않아도 반영되도록 매번 새로 읽음
-importlib.reload(dart)
-importlib.reload(prices)
+# ※ 속도를 위해 dart.py·prices.py 는 앱을 켤 때 한 번만 읽음 (코드를 고치면 run.bat 을 다시 실행)
 
 st.set_page_config(page_title="상장회사 분석", layout="wide")
 # 작업 중 표시(달리는 아이콘)를 화면 가운데에 크게 표시
@@ -28,6 +26,12 @@ st.markdown("""<style>
     background: rgba(255,255,255,0.9); border-radius: 12px; padding: 6px 10px;
     box-shadow: 0 2px 12px rgba(0,0,0,0.15);
 }
+/* 좌우 스크롤바 크게 */
+::-webkit-scrollbar { height: 16px; width: 12px; }
+::-webkit-scrollbar-track { background: rgba(128,128,128,0.12); border-radius: 8px; }
+::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.55); border-radius: 8px; border: 3px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: rgba(100,100,100,0.8); background-clip: padding-box; }
+* { scrollbar-width: auto; }
 /* 상단 공백 줄이기 */
 .block-container, [data-testid="stMainBlockContainer"] { padding-top: 1rem !important; padding-bottom: 1rem !important; }
 [data-testid="stHeader"] { height: 2rem !important; min-height: 2rem !important; background: transparent !important; }
@@ -47,8 +51,27 @@ def secret(name):
     return v or os.environ.get(name, "")
 
 
+# 미리 받아둔 자료 폴더: 앱 폴더의 cache, 없으면 한 단계 위(저장소 맨 위)의 cache
+CACHE = next((p for p in (ROOT / "cache", ROOT.parent / "cache") if p.exists()), ROOT / "cache")
+
+
+@st.cache_resource(show_spinner="미리 받아둔 자료 불러오는 중...")
+def load_prefetched():
+    """GitHub가 매일 새벽 받아둔 자료(cache 폴더)를 불러옴 → 서버 조회가 거의 없어져 빨라짐"""
+    return dart.load_cache(CACHE / "dart.json.gz"), prices.load_cache(CACHE / "prices.json.gz")
+
+
+load_prefetched()
+
+
 @st.cache_data(ttl=86400, show_spinner="회사 목록 불러오는 중...")
 def corp_list(key):
+    f = CACHE / "corps.csv"
+    if f.exists() and (dt.datetime.now().timestamp() - f.stat().st_mtime) < 7 * 86400:
+        try:
+            return pd.read_csv(f, dtype=str)
+        except Exception:
+            pass
     return dart.load_corp_codes(key)
 
 
@@ -198,6 +221,19 @@ def html_table(rows, companies, markets=None):
     cols = "<col>" * len(companies)
     return (css + f"<div style='overflow-x:auto;padding-bottom:40px'><table class='mt' style='min-width:{280 + 90 * len(companies)}px'><colgroup><col style='width:84px'><col style='width:210px'>{cols}</colgroup><thead><tr><th>구분</th><th>지표</th>{head}</tr></thead>"
             f"<tbody>{''.join(body)}</tbody></table></div>")
+
+
+def _safe(f, *a):
+    try:
+        return f(*a)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def excel_cached(sheets, footer):
+    """같은 화면이면 엑셀 파일을 다시 만들지 않음"""
+    return excel_bytes(sheets, footer)
 
 
 def excel_bytes(sheets, footer=None):
@@ -362,6 +398,22 @@ with tabs[0]:
 q = QUARTERS[qname]
 
 # ================= 데이터 =================
+# 여러 회사 자료를 동시에 미리 불러오기 (속도 향상) — 결과는 dart 모듈 안에 저장돼 아래에서 바로 사용
+def _warm(code):
+    for job in (lambda: dart.financials(key, code, (base_year,), q, fs),
+                lambda: dart.company(key, code),
+                lambda: dart.basic_eps(key, code, base_year if q in (0, 4) else base_year - 1),
+                lambda: dart.dividend(key, code, base_year if q in (0, 4) else base_year - 1),
+                lambda: dart.shares(key, code, base_year)):
+        try:
+            job()
+        except Exception:
+            pass
+
+
+with ThreadPoolExecutor(max_workers=8) as ex:
+    list(ex.map(_warm, [lab2code[l] for l in picked]))
+
 data = {}
 for lab in picked:
     try:
@@ -432,6 +484,20 @@ val_rows = []
 with tabs[1]:
     period = st.select_slider("주가 기간", [90, 180, 365, 730, 1095], value=365,
                               format_func=lambda d: f"{d // 365}년" if d >= 365 else f"{d}일")
+    # 주가·재무 자료를 여러 회사 동시에 미리 불러오기 (속도 향상)
+    def _warm2(lab):
+        code, cc = lab.split("(")[-1].rstrip(")"), lab2code[lab]
+        for job in (lambda: prices.history(code, period, gov_key),
+                    lambda: dart.financials(key, cc, (this_year - 2, this_year - 1), 0),
+                    lambda: dart.shares(key, cc, this_year - 1),
+                    lambda: dart.dividend(key, cc, this_year - 1),
+                    lambda: dart.basic_eps(key, cc, dart.eps_year_for(dt.date.today()))):
+            try:
+                job()
+            except Exception:
+                pass
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(_warm2, picked))
     hist = []
     for lab in picked:
         code, name = lab.split("(")[-1].rstrip(")"), lab.split(" (")[0]
@@ -475,6 +541,8 @@ with tabs[2]:
     only_imp = st.checkbox("중요 공시만 보기 (증자·전환사채·최대주주 변경·소송 등)")
     end = dt.date.today()
     bgn = end - dt.timedelta(days=days)
+    with ThreadPoolExecutor(max_workers=8) as ex:  # 공시 동시 조회
+        list(ex.map(lambda l: _safe(dart.disclosures, key, lab2code[l], bgn.strftime("%Y%m%d"), end.strftime("%Y%m%d")), picked))
     parts = []
     for lab in picked:
         try:
@@ -506,7 +574,7 @@ with tabs[3]:
 # ================= 엑셀 (헤더 버튼) =================
 raw_x = long.assign(분기=qname) if not long.empty else long
 sheets = {"지표비교": table, "원자료": raw_x, "가치평가": val_df, "공시": dis}
-dl_slot.download_button("엑셀 받기", excel_bytes(sheets, f"기준: {base_year}년 {qname} · {fs}재무제표"),
+dl_slot.download_button("엑셀 받기", excel_cached(sheets, f"기준: {base_year}년 {qname} · {fs}재무제표"),
                         file_name=f"상장사분석_{base_year}년_{qname}_{dt.date.today():%Y%m%d}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         width="stretch")
