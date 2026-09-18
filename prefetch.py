@@ -48,10 +48,15 @@ def find_companies(corps):
     return out
 
 
-def safe(f, *a):
+ERRORS = []
+
+
+def safe(f, *a, **kw):
     try:
-        return f(*a)
-    except Exception:
+        return f(*a, **kw)
+    except Exception as e:
+        if len(ERRORS) < 30:
+            ERRORS.append(f"{getattr(f, '__name__', f)} {a[1:] if a else ''} {kw.get('corp_code', '')}: {e}")
         return None
 
 
@@ -97,7 +102,9 @@ def main():
     fetch_krx([d for d in ends if d <= TODAY] + [TODAY - dt.timedelta(days=1), TODAY])
     n1 = dart.dump_cache(OUT / "dart.json.gz")
     n2 = prices.dump_cache(OUT / "prices.json.gz", set(comp.values()))
-    print(f"DART 조회 {n1}건, 주가 {n2} 저장 · {time.time() - t0:.0f}초")
+    msg = f"{TODAY} · 회사 {len(comp)}개 · DART 조회 {n1}건, 주가 {n2} 저장 · {time.time() - t0:.0f}초"
+    print(msg)
+    (OUT / "prefetch_log.txt").write_text(msg + "\n\n오류 예시:\n" + "\n".join(ERRORS), encoding="utf-8")
 
 
 if __name__ == "__main__":
