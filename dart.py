@@ -28,7 +28,7 @@ API_TTL = 6 * 3600  # 같은 조회는 6시간 동안 다시 부르지 않음
 def _get(key, path, **params):
     ck = (path, tuple(sorted(params.items())))
     hit = _api_cache.get(ck)
-    ttl = 600 if path == "list.json" else API_TTL  # 공시 목록은 10분
+    ttl = 600 if path == "list.json" else API_TTL  # 공시 목록은 10분 (미리 받은 자료는 load_cache 참고)
     if hit and time.time() - hit[0] < ttl:
         return hit[1]
     params["crtfc_key"] = key
@@ -43,6 +43,46 @@ def _get(key, path, **params):
     with _api_lock:
         _api_cache[ck] = (time.time(), d)
     return d
+
+
+# ---------------------------------------------------------------- 미리 받아둔 자료 (prefetch.py)
+_FS_COLS = ("sj_div", "account_id", "account_nm", "thstrm_amount", "thstrm_add_amount",
+            "frmtrm_amount", "frmtrm_add_amount")
+
+
+def _slim(path, d):
+    """저장 용량 줄이기: 재무제표는 계산에 쓰는 표·칸만 남김 (자본변동표 등 제외)"""
+    if path != "fnlttSinglAcntAll.json" or not d:
+        return d
+    rows = [{c: r.get(c) for c in _FS_COLS if c in r} for r in d.get("list", [])
+            if r.get("sj_div") in ("BS", "IS", "CIS", "CF")]
+    return {"status": d.get("status"), "list": rows}
+
+
+def dump_cache(file):
+    """지금까지 받은 DART 조회 결과를 파일로 저장 (공시 목록은 제외)"""
+    import gzip, json
+    items = sorted([[p, [list(kv) for kv in prm], _slim(p, v[1])]
+                    for (p, prm), v in _api_cache.items() if p != "list.json"], key=lambda x: json.dumps(x[:2]))
+    raw = json.dumps(items, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    with open(file, "wb") as f, gzip.GzipFile(fileobj=f, mode="wb", mtime=0) as g:  # 내용이 같으면 파일도 같게
+        g.write(raw)
+    return len(items)
+
+
+def load_cache(file, valid_hours=36):
+    """저장해 둔 조회 결과를 불러옴. valid_hours 동안은 다시 조회하지 않음"""
+    import gzip, json
+    try:
+        with gzip.open(file, "rb") as g:
+            items = json.loads(g.read().decode("utf-8"))
+    except Exception:
+        return 0
+    ts = time.time() - API_TTL + valid_hours * 3600
+    with _api_lock:
+        for p, prm, d in items:
+            _api_cache[(p, tuple(tuple(kv) for kv in prm))] = (ts, d)
+    return len(items)
 
 
 def load_corp_codes(key):

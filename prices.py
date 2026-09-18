@@ -88,6 +88,40 @@ def _naver(stock_code, days):
 _hist_cache = {}
 
 
+def dump_cache(file, codes=None):
+    """주가 이력·KRX 일별 시세를 파일로 저장. codes: 저장할 종목코드(없으면 전체)"""
+    import gzip, json
+    hist = [[k[0], k[1], k[2], v[1][0].assign(날짜=v[1][0]["날짜"].dt.strftime("%Y-%m-%d")).to_dict("records"), v[1][1]]
+            for k, v in _hist_cache.items()]
+    krx = {}
+    for day, df in _krx_cache.items():
+        if not df.empty and codes is not None:
+            df = df[df["ISU_CD"].isin(codes)]
+        krx[day] = df.to_dict("records")
+    raw = json.dumps({"hist": hist, "krx": krx}, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    with open(file, "wb") as f, gzip.GzipFile(fileobj=f, mode="wb", mtime=0) as g:
+        g.write(raw)
+    return len(hist), len(krx)
+
+
+def load_cache(file, valid_hours=36):
+    import gzip, json, time
+    try:
+        with gzip.open(file, "rb") as g:
+            d = json.loads(g.read().decode("utf-8"))
+    except Exception:
+        return 0
+    ts = time.time() - 3600 + valid_hours * 3600
+    for code, days, gov, recs, src in d.get("hist", []):
+        df = pd.DataFrame(recs)
+        if not df.empty:
+            df["날짜"] = pd.to_datetime(df["날짜"])
+            _hist_cache[(code, days, gov)] = (ts, (df, src))
+    for day, recs in d.get("krx", {}).items():
+        _krx_cache.setdefault(day, pd.DataFrame(recs))
+    return len(d.get("hist", []))
+
+
 def history(stock_code, days=365, gov_key=""):
     """(주가 표, 출처) — 1시간 동안 같은 조회 재사용"""
     import time
