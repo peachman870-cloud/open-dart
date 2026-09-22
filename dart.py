@@ -56,7 +56,7 @@ def _get(key, path, **params):
 
 # ---------------------------------------------------------------- 미리 받아둔 자료 (prefetch.py)
 _FS_COLS = ("sj_div", "account_id", "account_nm", "thstrm_amount", "thstrm_add_amount",
-            "frmtrm_amount", "frmtrm_add_amount")
+            "frmtrm_amount", "frmtrm_add_amount", "rcept_no")
 
 
 def _slim(path, d):
@@ -204,6 +204,83 @@ def full_statements(key, corp_code, year, reprt_code="11011", fs_pref="연결"):
 
 
 Q_REPORT = {1: "11013", 2: "11012", 3: "11014", 4: "11011"}  # 1분기, 반기, 3분기, 사업보고서
+
+
+# ---------------------------------------------------------------- 재고자산평가충당금 (주석)
+REPORT_KIND = {"11011": ("A001", "사업보고서"), "11012": ("A002", "반기보고서"),
+               "11013": ("A003", "분기보고서"), "11014": ("A003", "분기보고서")}
+REPORT_MONTH = {"11011": "12", "11012": "06", "11013": "03", "11014": "09"}
+
+
+def report_rcept_no(key, corp_code, year, reprt_code):
+    """정기보고서 접수번호. 재무제표 원자료에 있으면 그것을, 없으면 공시목록에서 찾음"""
+    for fs in ("CFS", "OFS"):
+        d = _get(key, "fnlttSinglAcntAll.json", corp_code=corp_code, bsns_year=str(year),
+                 reprt_code=reprt_code, fs_div=fs)
+        for r in (d or {}).get("list", [])[:1]:
+            if r.get("rcept_no"):
+                return r["rcept_no"]
+    ty, _ = REPORT_KIND[reprt_code]
+    y2 = int(year) + 1 if reprt_code == "11011" else int(year)
+    d = _get(key, "list.json", corp_code=corp_code, bgn_de=f"{year}0101", end_de=f"{y2}1231",
+             pblntf_detail_ty=ty, page_count=100)
+    tag = f"({year}.{REPORT_MONTH[reprt_code]})"
+    hits = [r for r in (d or {}).get("list", []) if tag in r.get("report_nm", "")]
+    return hits[0]["rcept_no"] if hits else None  # 목록은 최신순 → 정정본 우선
+
+
+_TE = __import__("re").compile(r"<TE\b([^>]*)>([^<]*)</TE>", __import__("re").I)
+_ATTR = __import__("re").compile(r'(\w+)="([^"]*)"')
+
+
+def _allowance_from_doc(xml_text):
+    """공시 원문에서 재고자산평가충당금 합계(원). {'연결': 값, '별도': 값, '': 값(구분 없음)}"""
+    out = {}
+    for attrs, val in _TE.findall(xml_text):
+        a = dict(_ATTR.findall(attrs))
+        ctx = a.get("ACONTEXT", "")
+        if a.get("ACODE") != "ifrs-full_Inventories" or "AllowanceForInventoryValuation" not in ctx:
+            continue
+        if not ctx.startswith("C"):  # C = 당기(말), P = 전기
+            continue
+        v = _num(val)
+        if v is None:
+            continue
+        dec = int(a.get("ADECIMAL") or 0)
+        v = abs(v) * (10 ** -dec if dec < 0 else 1)
+        kind = "연결" if "ConsolidatedMember" in ctx else "별도" if "SeparateMember" in ctx else ""
+        out.setdefault(kind, v)
+    return out
+
+
+def inventory_allowance(key, corp_code, year, reprt_code, fs_label):
+    """재고자산평가충당금(원). 원문(document.xml)을 한 번만 받아 결과를 조회 캐시에 저장"""
+    ck = ("allowance", (("corp_code", corp_code), ("bsns_year", str(year)), ("reprt_code", reprt_code)))
+    hit = _api_cache.get(ck)
+    if hit is None or time.time() - hit[0] > API_TTL * 4 * 30:
+        rno = report_rcept_no(key, corp_code, year, reprt_code)
+        res = {}
+        if rno:
+            if BREAKER and time.time() < _down_until[0]:
+                raise DartError("DART 서버에 연결할 수 없어요 (잠시 후 다시 시도)")
+            try:
+                r = SESSION.get(f"{BASE}/document.xml", params={"crtfc_key": key, "rcept_no": rno}, timeout=(5, 60))
+                r.raise_for_status()
+                z = zipfile.ZipFile(io.BytesIO(r.content))
+            except (requests.RequestException, zipfile.BadZipFile):
+                raise DartError("공시 원문을 받지 못했어요") from None
+            main = max(z.namelist(), key=lambda n: z.getinfo(n).file_size)
+            raw = z.read(main)
+            try:
+                txt = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                txt = raw.decode("cp949", errors="ignore")
+            res = _allowance_from_doc(txt)
+        with _api_lock:
+            _api_cache[ck] = (time.time(), res)
+        hit = _api_cache[ck]
+    res = hit[1] or {}
+    return res.get(fs_label, res.get(""))
 FLOW_KEYS = [k for k, v in ITEMS.items() if v[0] != BS]  # 손익·현금흐름 (기간 누적 값)
 _cum_cache = {}
 
@@ -333,7 +410,8 @@ def ratios(cur, begin, yoy, f=1):
 GROUPS = {
     "수익성": ["매출총이익률(%)", "영업이익률(%)", "순이익률(%)", "EBITDA마진(%)", "ROE(%)", "ROA(%)"],
     "안정성": ["부채비율(%)", "유동비율(%)", "당좌비율(%)", "자기자본비율(%)", "차입금의존도(%)", "이자보상배율(배)"],
-    "활동성": ["총자산회전율(회)", "재고자산회전율(회)", "재고자산회전일수(일)", "매출채권회전율(회)", "매출채권회전일수(일)"],
+    "활동성": ["총자산회전율(회)", "재고자산회전율(회)", "재고자산회전일수(일)", "재고자산충당금설정률(%)",
+            "매출채권회전율(회)", "매출채권회전일수(일)"],
     "성장성": ["매출증가율(%)", "영업이익증가율(%)", "순이익증가율(%)", "총자산증가율(%)"],
     "현금흐름": ["영업활동현금흐름", "잉여현금흐름(FCF)", "설비투자(CAPEX)", "EBITDA", "순차입금"],
     "가치평가": ["PER(배)", "PBR(배)", "PSR(배)", "EV/EBITDA(배)", "배당수익률(%)", "주가(원)", "시가총액(억원)",
@@ -475,6 +553,7 @@ DESC = {
     "총자산회전율(회)": "매출액 ÷ 평균 자산총계",
     "재고자산회전율(회)": "매출원가 ÷ 평균 재고자산\n연간: 기초·기말 평균\n분기: 최근 4개 분기 매출원가 합계 ÷ (1년 전 같은 분기말·이번 분기말 재고 평균)\n매출원가가 없는 회사는 표시 안 함",
     "재고자산회전일수(일)": "365 ÷ 재고자산회전율",
+    "재고자산충당금설정률(%)": "재고자산평가충당금 ÷ 충당금 차감 전 재고자산 총액 × 100\n(총액 = 재무상태표 재고자산 + 평가충당금)\n충당금은 보고서 주석(재고자산)의 XBRL 태그에서 읽음 · 기간 말 기준\n주석에 충당금 표시가 없으면 빈칸",
     "매출채권회전율(회)": "매출액 ÷ 평균 매출채권",
     "매출채권회전일수(일)": "365 ÷ 매출채권회전율",
     "매출증가율(%)": "(당기 매출액 ÷ 전년 동기 매출액 − 1) × 100\n(전년 값이 0 이하면 표시 안 함)",

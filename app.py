@@ -385,7 +385,8 @@ years = tuple(range(y1, y2 + 1))
 
 # ================= 왼쪽: 지표 선택 =================
 st.sidebar.markdown("#### 표시할 재무지표")
-DEFAULT_METRICS = ["영업이익률(%)", "부채비율(%)", "재고자산회전율(회)", "매출증가율(%)", "영업활동현금흐름", "PER(배)", "시가총액(억원)"]
+DEFAULT_METRICS = ["영업이익률(%)", "부채비율(%)", "재고자산회전율(회)", "매출증가율(%)", "영업활동현금흐름", "PER(배)", "시가총액(억원)",
+                   "재고자산충당금설정률(%)"]
 BASE_ROWS = ["매출액", "영업이익"]  # 표 맨 위에 항상 표시 (억원)
 chosen = []
 for g, ks in dart.GROUPS.items():
@@ -453,6 +454,35 @@ if any(k in chosen for k in VAL_KEYS):
             val_src.add(src)
         for k, x in v.items():
             d.loc[d.index[-1], k] = x
+
+# 재고자산충당금설정률 (주석의 재고자산평가충당금 ÷ 재고자산) — 선택했을 때만 공시 원문을 받아 계산
+ALLOW_KEY = "재고자산충당금설정률(%)"
+
+
+@st.cache_data(ttl=86400 * 7, show_spinner=False)
+def allowance_for(key, corp_code, year, reprt_code, fs_label):
+    return dart.inventory_allowance(key, corp_code, year, reprt_code, fs_label)
+
+
+if ALLOW_KEY in chosen:
+    rc_ = dart.Q_REPORT[q or 4]
+    jobs = [(lab, d) for lab, d in data.items() if not d.empty]
+
+    def _allow(item):
+        lab, d = item
+        try:
+            return lab, allowance_for(key, lab2code[lab], base_year, rc_, str(d.iloc[-1].get("기준") or fs))
+        except Exception:
+            return lab, None
+
+    with st.spinner("재고자산평가충당금(주석) 읽는 중..."):
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            res_ = dict(ex.map(_allow, jobs))
+    for lab, d in jobs:
+        a_, inv_ = res_.get(lab), d.iloc[-1].get("재고자산")
+        # 분모 = 충당금 차감 전 재고자산 총액 (재무상태표 재고자산 + 평가충당금)
+        d.loc[d.index[-1], ALLOW_KEY] = (round(a_ / (inv_ + a_) * 100, 2)
+                                         if a_ is not None and inv_ and not pd.isna(inv_) and inv_ + a_ > 0 else None)
 
 frames = [to_eok(d).assign(회사=l.split(" (")[0]) for l, d in data.items() if not d.empty]
 long = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
