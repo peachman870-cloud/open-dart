@@ -209,12 +209,24 @@ def html_table(rows, companies, markets=None):
         f = (lambda v: "-" if v is None or pd.isna(v) else f"{v:,.0f}") if (k in dart.AMOUNT_METRICS or k in BASE_ROWS) else fmt
         cells = "".join(f"<td class='n'>{f(r[c])}</td>" for c in companies)
         body.append(f"<tr>{gcell}<td class='k'>{name}</td>{cells}</tr>")
+    try:  # 틀고정 칸의 배경색 (다크 모드 대응)
+        dark = st.context.theme.type == "dark"
+    except Exception:
+        dark = False
+    bg = "#0e1117" if dark else "#ffffff"
     css = """<style>
-.mt{border-collapse:collapse;width:100%;font-size:14px;table-layout:fixed}
+.mtwrap{overflow:auto;max-height:78vh;padding-bottom:40px}
+.mt{border-collapse:separate;border-spacing:0;width:100%;font-size:14px;table-layout:fixed}
+/* 틀고정: 머리글(위) + 구분·지표(왼쪽) */
+.mt thead th{position:sticky;top:0;z-index:3;background:BGC;border-bottom:2px solid rgba(128,128,128,.45)}
+.mt td.g,.mt th:nth-child(1){position:sticky;left:0;z-index:2;background:BGC}
+.mt td.k,.mt th:nth-child(2){position:sticky;left:84px;z-index:2;background:BGC;box-shadow:2px 0 0 rgba(128,128,128,.25)}
+.mt thead th:nth-child(1),.mt thead th:nth-child(2){z-index:4}
+.mt td.k:hover,.mt td.k:focus-within{z-index:5}
 .mt th,.mt td{border-bottom:1px solid rgba(128,128,128,.25);padding:6px 10px}
 .mt td{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mt th{text-align:center;vertical-align:middle;font-weight:600;white-space:normal;word-break:keep-all;overflow-wrap:anywhere}
-.mt td.n{text-align:right;font-variant-numeric:tabular-nums}.mt td.g{font-weight:600;opacity:.75;vertical-align:middle}
+.mt td.n{text-align:right;font-variant-numeric:tabular-nums}.mt td.g{font-weight:600;color:rgba(128,128,128,1);vertical-align:middle}
 .mt td.k{overflow:visible}
 .mt .tip{position:relative;display:inline-block;cursor:help;margin-left:4px;vertical-align:super;
  width:15px;height:15px;line-height:15px;text-align:center;border-radius:50%;font-size:10px;font-weight:700;
@@ -225,8 +237,9 @@ def html_table(rows, companies, markets=None):
  padding:8px 10px;border-radius:6px;background:#262730;color:#fff;font-size:12.5px;font-weight:400;
  line-height:1.5;text-align:left;box-shadow:0 4px 12px rgba(0,0,0,.25);vertical-align:baseline}
 </style>"""
+    css = css.replace("BGC", bg)
     cols = "<col>" * len(companies)
-    return (css + f"<div style='overflow-x:auto;padding-bottom:40px'><table class='mt' style='min-width:{280 + 90 * len(companies)}px'><colgroup><col style='width:84px'><col style='width:210px'>{cols}</colgroup><thead><tr><th>구분</th><th>지표</th>{head}</tr></thead>"
+    return (css + f"<div class='mtwrap'><table class='mt' style='min-width:{280 + 90 * len(companies)}px'><colgroup><col style='width:84px'><col style='width:210px'>{cols}</colgroup><thead><tr><th>구분</th><th>지표</th>{head}</tr></thead>"
             f"<tbody>{''.join(body)}</tbody></table></div>")
 
 
@@ -460,8 +473,8 @@ ALLOW_KEY = "재고자산충당금설정률(%)"
 
 
 @st.cache_data(ttl=86400 * 7, show_spinner=False)
-def allowance_for(key, corp_code, year, reprt_code, fs_label):
-    return dart.inventory_allowance(key, corp_code, year, reprt_code, fs_label)
+def allowance_for(key, corp_code, year, reprt_code, fs_label, net_inv):
+    return dart.inventory_allowance(key, corp_code, year, reprt_code, fs_label, net_inv)
 
 
 if ALLOW_KEY in chosen:
@@ -471,7 +484,9 @@ if ALLOW_KEY in chosen:
     def _allow(item):
         lab, d = item
         try:
-            return lab, allowance_for(key, lab2code[lab], base_year, rc_, str(d.iloc[-1].get("기준") or fs))
+            inv0 = d.iloc[-1].get("재고자산")
+            inv0 = None if inv0 is None or pd.isna(inv0) else float(inv0)
+            return lab, allowance_for(key, lab2code[lab], base_year, rc_, str(d.iloc[-1].get("기준") or fs), inv0)
         except Exception:
             return lab, None
 

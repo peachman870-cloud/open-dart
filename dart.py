@@ -253,9 +253,73 @@ def _allowance_from_doc(xml_text):
     return out
 
 
-def inventory_allowance(key, corp_code, year, reprt_code, fs_label):
+# 주석 표에서 찾을 때 쓰는 말 (회사마다 용어가 달라서 여러 표현을 인정)
+#   재고자산평가충당금, 평가손실충당금, 재고자산평가손실충당금, 평가충당금, 손실충당금, 평가손실누계(액), 평가감 등
+_ALLOW_WORDS = __import__("re").compile(r"충당금|평가손실누계|평가손실|평가감|저가")
+_TABLE = __import__("re").compile(r"<TABLE\b.*?</TABLE>", __import__("re").S | __import__("re").I)
+_ROW = __import__("re").compile(r"<TR\b.*?</TR>", __import__("re").S | __import__("re").I)
+_CELL = __import__("re").compile(r"<(TD|TE|TH|TU)\b[^>]*>(.*?)</\1>", __import__("re").S | __import__("re").I)
+_TAG = __import__("re").compile(r"<[^>]+>")
+
+
+def _cell_num(s):
+    s = _TAG.sub("", s).replace("&nbsp;", " ").strip()
+    if s in ("-", "－", "—", ""):
+        return 0.0 if s else None
+    neg = s.startswith("(") and s.endswith(")") or s.startswith("-") or s.startswith("△") or s.startswith("▲")
+    s2 = s.strip("()△▲-− ").replace(",", "")
+    try:
+        v = float(s2)
+    except ValueError:
+        return None
+    return -v if neg else v
+
+
+def _allowance_from_tables(xml_text, net):
+    """XBRL 태그가 없는 회사용: 주석 표에서 '취득원가 − 충당금 = 장부금액'이 맞는 숫자를 찾음.
+    net: 재무상태표 재고자산(원). 단위(원·천원·백만원)와 연결/별도 구분은 이 금액과 맞춰서 판단."""
+    if not net:
+        return None
+    for tb in _TABLE.findall(xml_text):
+        if not _ALLOW_WORDS.search(tb):
+            continue
+        rows = []
+        for tr in _ROW.findall(tb):
+            cells = [c[1] for c in _CELL.findall(tr)]
+            if cells:
+                rows.append((_TAG.sub("", cells[0]).replace(" ", ""), [_cell_num(c) for c in cells]))
+        for unit in (1, 1_000, 1_000_000):
+            target = net / unit
+            tol = max(2.0, abs(target) * 0.001)
+            ok = lambda v: v is not None and abs(v - target) <= tol
+            # (가) 가로형: 한 줄에 [취득원가, (충당금), 장부금액]이 이어서 나옴
+            for label, nums in rows:
+                for i in range(len(nums) - 2):
+                    g, a, n = nums[i], nums[i + 1], nums[i + 2]
+                    if None in (g, a, n) or not ok(n) or g <= 0:
+                        continue
+                    if abs(g - abs(a) - n) <= tol and abs(a) > 0:
+                        return abs(a) * unit
+                    if abs(a) == 0 and abs(g - n) <= tol:
+                        return 0.0
+            # (나) 세로형: '충당금' 줄과 '합계/장부금액' 줄이 따로 있음 → 같은 칸끼리 맞춤
+            allow_rows = [nums for label, nums in rows if _ALLOW_WORDS.search(label)]
+            for nums_a in allow_rows:
+                for j, a in enumerate(nums_a):
+                    if a is None or a == 0:
+                        continue
+                    col = [r[j] for _, r in rows if j < len(r) and r[j] is not None and r is not nums_a]
+                    has_net = any(ok(v) for v in col)                                # 장부금액 줄
+                    has_gross = any(abs(v - abs(a) - target) <= tol for v in col)    # 취득원가 줄
+                    if has_net and has_gross:
+                        return abs(a) * unit
+    return None
+
+
+def inventory_allowance(key, corp_code, year, reprt_code, fs_label, net_inventory=None):
     """재고자산평가충당금(원). 원문(document.xml)을 한 번만 받아 결과를 조회 캐시에 저장"""
-    ck = ("allowance", (("corp_code", corp_code), ("bsns_year", str(year)), ("reprt_code", reprt_code)))
+    ck = ("allowance2", (("corp_code", corp_code), ("bsns_year", str(year)), ("reprt_code", reprt_code),
+                         ("fs", fs_label), ("inv", round(net_inventory or 0))))
     hit = _api_cache.get(ck)
     if hit is None or time.time() - hit[0] > API_TTL * 4 * 30:
         rno = report_rcept_no(key, corp_code, year, reprt_code)
@@ -275,7 +339,11 @@ def inventory_allowance(key, corp_code, year, reprt_code, fs_label):
                 txt = raw.decode("utf-8")
             except UnicodeDecodeError:
                 txt = raw.decode("cp949", errors="ignore")
-            res = _allowance_from_doc(txt)
+            res = _allowance_from_doc(txt)  # 1순위: XBRL 태그 (대형사)
+            if res.get(fs_label, res.get("")) is None:  # 2순위: 주석 표 숫자 맞추기 (용어가 달라도 됨)
+                v = _allowance_from_tables(txt, net_inventory)
+                if v is not None:
+                    res = {fs_label: v}
         with _api_lock:
             _api_cache[ck] = (time.time(), res)
         hit = _api_cache[ck]
