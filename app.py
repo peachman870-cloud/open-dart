@@ -537,6 +537,17 @@ with tabs[0]:
             solo = [c for c in snap.index if snap.at[c, "기준"] == "별도"]
             if solo:
                 st.caption(f"연결재무제표가 없어 별도로 표시한 회사: {', '.join(solo)}")
+        # 재고자산회전율이 빈칸인 이유 안내 (지주회사·금융회사 등은 매출원가·재고자산 계정이 없음)
+        if any(k in chosen for k in ("재고자산회전율(회)", "재고자산회전일수(일)", "재고자산충당금설정률(%)")):
+            why = []
+            for c in snap.index:
+                miss = [n for n in ("재고자산", "매출원가") if n not in snap or pd.isna(snap.at[c, n])]
+                if miss:
+                    why.append(f"{c}({'·'.join(miss)} 없음)")
+            if why:
+                st.caption("재고 관련 지표가 빈칸인 회사: " + ", ".join(why)
+                           + " · 지주회사·금융회사는 별도재무제표에 이 계정이 없어요. 위 재무제표를 '연결'로 바꾸면 보일 수 있어요.")
+
         fin_names = [c for c in snap.index if pd.isna(snap.at[c, "매출액"])] if "매출액" in snap else []
         if fin_names:
             st.caption(f"금융회사 등 매출액 계정이 없는 회사({', '.join(fin_names)})는 일부 지표가 빈칸이에요.")
