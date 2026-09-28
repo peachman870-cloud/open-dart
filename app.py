@@ -413,7 +413,8 @@ if not picked:
     st.info("회사를 선택해 주세요.")
     st.stop()
 
-tabs = st.tabs(["재무지표 비교", "주가·가치평가", "공시", "정기 리포트", "상세 공시정보"])
+tabs = st.tabs(["재무지표 비교", "주가·가치평가", "공시", "정기 리포트", "상세 공시정보",
+                "기준정보(판매채널)", "인건비·투자 계획"])
 QUARTERS = {"연간": 0, "1Q": 1, "2Q": 2, "3Q": 3, "4Q": 4}
 with tabs[0]:
     c1, c2, c3 = st.columns([len(years), 5, 2.2], gap="medium")
@@ -745,6 +746,168 @@ with tabs[4]:
             st.info("위에서 회사를 먼저 선택해 주세요.")
     except Exception as e:
         st.error(safe_msg(e))
+
+# ================= 6. 기준정보 (판매채널) =================
+@st.cache_data(ttl=600)
+def load_channels():
+    """판매채널 기준정보 (channels.json) — 자사몰·온라인 플랫폼·오프라인 매장, 국가 구분"""
+    try:
+        d = json.loads((ROOT / "channels.json").read_text(encoding="utf-8"))
+        return pd.DataFrame(d.get("채널", [])), d.get("갱신일", ""), d.get("설명", "")
+    except Exception:
+        return pd.DataFrame(), "", ""
+
+
+with tabs[5]:
+    ch_df, ch_date, ch_desc = load_channels()
+    if ch_df.empty:
+        st.info("channels.json 파일이 없어요. 판매채널 기준정보를 넣으면 여기에 보여요.")
+    else:
+        st.caption(f"{ch_desc} · 갱신일 {ch_date}")
+        c1, c2, c3 = st.columns([2.2, 1.6, 2.2])
+        kinds = c1.pills("구분", list(ch_df["구분"].unique()), selection_mode="multi",
+                         default=list(ch_df["구분"].unique()), key="ch_kind")
+        ctrys = c2.pills("국가", list(ch_df["국가"].unique()), selection_mode="multi",
+                         default=list(ch_df["국가"].unique()), key="ch_ctry")
+        kw = c3.text_input("채널명 검색", key="ch_kw").strip()
+        edit_mode = st.toggle("수정 모드 (국가명 등 직접 입력)", key="ch_edit")
+        v = ch_df[ch_df["구분"].isin(kinds or list(ch_df["구분"].unique()))
+                  & ch_df["국가"].isin(ctrys or list(ch_df["국가"].unique()))]
+        if kw:
+            v = v[v["채널명"].str.contains(kw, case=False, na=False)]
+        n = v.groupby(["구분", "국가", "국가명"], dropna=False).size().reset_index(name="채널 수")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("채널 수", len(v))
+        m2.metric("평균 기본수수료(%)", f'{v["기본수수료(%)"].mean():.1f}' if v["기본수수료(%)"].notna().any() else "-")
+        m3.metric("해외 채널", int((v["국가"] == "해외").sum()))
+        COUNTRIES = ["대한민국", "미국", "중국", "일본", "대만", "홍콩", "싱가포르", "베트남", "태국",
+                     "인도네시아", "말레이시아", "필리핀", "호주", "캐나다", "영국", "프랑스", "독일", "다국가", ""]
+        cfg = {"월세": st.column_config.NumberColumn(format="%,d"),
+               "보증금": st.column_config.NumberColumn(format="%,d"),
+               "시설장치": st.column_config.NumberColumn(format="%,d"),
+               "기본수수료(%)": st.column_config.NumberColumn(format="%.2f"),
+               "구분": st.column_config.SelectboxColumn(options=["자사몰", "온라인", "오프라인"]),
+               "국가": st.column_config.SelectboxColumn(options=["국내", "해외"]),
+               "국가명": st.column_config.SelectboxColumn("국가명 (직접 입력·선택)", options=COUNTRIES)}
+        if edit_mode:
+            ed = st.data_editor(v, width="stretch", hide_index=True, num_rows="dynamic",
+                                column_config=cfg, key="ch_editor")
+            if st.button("기준정보 저장", type="primary", key="ch_save"):
+                keep = ch_df.drop(index=v.index, errors="ignore")
+                new_df = pd.concat([keep, ed], ignore_index=True)
+                out = {"설명": ch_desc, "갱신일": f"{dt.date.today():%Y-%m-%d}",
+                       "채널": new_df.where(pd.notna(new_df), None).to_dict("records")}
+                try:
+                    (ROOT / "channels.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+                    load_channels.clear()
+                    st.success(f"저장했어요 ({len(new_df)}개 채널). channels.json 파일이 바뀌었어요.")
+                except Exception as e:
+                    st.error(f"저장하지 못했어요: {safe_msg(e)} · 웹앱에서는 파일을 저장할 수 없어요. 아래 CSV로 받아서 PC에서 고쳐 주세요.")
+        else:
+            st.dataframe(v, width="stretch", hide_index=True, column_config=cfg)
+        st.dataframe(n, width="stretch", hide_index=True)
+        st.download_button("기준정보 CSV 받기", v.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="판매채널_기준정보.csv")
+        st.caption("수정 모드를 켜면 표에서 바로 고칠 수 있어요 (국가명은 목록에서 고르거나 직접 입력). "
+                   "PC 앱에서는 저장 버튼으로 channels.json에 바로 저장돼요. "
+                   "웹앱에서는 저장이 임시라서, CSV로 받아 PC에서 고친 뒤 GitHub에 올려 주세요.")
+
+# ================= 7. 인건비·투자 계획 =================
+@st.cache_data(ttl=600)
+def load_hr():
+    """팀·인원 기준정보 (hr.json) — 직무 FTE 현황판 결과에서 만든 자료"""
+    try:
+        d = json.loads((ROOT / "hr.json").read_text(encoding="utf-8"))
+        return pd.DataFrame(d.get("인원", [])), d.get("갱신일", "")
+    except Exception:
+        return pd.DataFrame(), ""
+
+
+PAY_DEFAULT = {"부장": 8000, "차장": 7000, "과장": 6000, "대리": 5000, "주임": 4300, "사원": 3800, "미지정": 4500}
+
+with tabs[6]:
+    hr, hr_date = load_hr()
+    if hr.empty:
+        st.info("hr.json 파일이 없어요. 팀·인원 자료를 넣으면 여기에서 인건비를 계산할 수 있어요.")
+    else:
+        st.caption(f"현재 인원 {len(hr)}명 · 자료 기준일 {hr_date} (출처: 직무 FTE 현황판)")
+        c1, c2, c3 = st.columns(3)
+        year_p = c1.number_input("계획 연도", 2025, 2035, dt.date.today().year + 1, key="pl_y")
+        burden = c2.number_input("인건비 부담률(%)  4대보험·퇴직급여 등", 0.0, 100.0, 22.0, 0.5, key="pl_b")
+        raise_pct = c3.number_input("기존 인원 임금인상률(%)", 0.0, 30.0, 4.0, 0.5, key="pl_r")
+
+        st.markdown("**1) 직급별 기준 연봉 (만원) — 가정값이니 회사 기준으로 고쳐 주세요**")
+        pay_df = pd.DataFrame([{"직급": k or "미지정", "기준연봉(만원)": v} for k, v in PAY_DEFAULT.items()])
+        pay_ed = st.data_editor(pay_df, hide_index=True, width="stretch", key="pl_pay")
+        pay = {r["직급"]: float(r["기준연봉(만원)"] or 0) for _, r in pay_ed.iterrows()}
+
+        cur = hr.copy()
+        cur["직급"] = cur["직급"].replace("", "미지정").fillna("미지정")
+        cur["연봉(만원)"] = cur["직급"].map(lambda k: pay.get(k, pay.get("미지정", 0))) * (1 + raise_pct / 100)
+        cur_team = cur.groupby("팀").agg(현재인원=("이름", "count"), 현재FTE=("FTE", "sum"),
+                                       기존인건비=("연봉(만원)", "sum")).reset_index()
+        cur_team["기존인건비"] = (cur_team["기존인건비"] * (1 + burden / 100)).round(0)
+
+        st.markdown("**2) 신규 채용 계획** — 팀·직급·인원·입사월을 넣으면 근무 개월수만큼 계산돼요")
+        hire0 = pd.DataFrame({"팀": [hr["팀"].iloc[0]], "직급": ["사원"], "인원": [1], "입사월": [3],
+                              "연봉(만원)": [pay.get("사원", 3800)], "비고": [""]})
+        hire = st.data_editor(hire0, num_rows="dynamic", hide_index=True, width="stretch", key="pl_hire",
+                              column_config={"팀": st.column_config.SelectboxColumn(options=sorted(hr["팀"].unique())),
+                                             "직급": st.column_config.SelectboxColumn(options=list(pay)),
+                                             "입사월": st.column_config.NumberColumn(min_value=1, max_value=12, step=1),
+                                             "인원": st.column_config.NumberColumn(min_value=0, step=1)})
+        h = hire.dropna(subset=["팀"]).copy()
+        if not h.empty:
+            h["인원"] = pd.to_numeric(h["인원"], errors="coerce").fillna(0)
+            h["연봉(만원)"] = pd.to_numeric(h["연봉(만원)"], errors="coerce").fillna(0)
+            h["근무개월"] = 13 - pd.to_numeric(h["입사월"], errors="coerce").fillna(1).clip(1, 12)
+            h["신규인건비"] = (h["인원"] * h["연봉(만원)"] * h["근무개월"] / 12 * (1 + burden / 100)).round(0)
+            hire_team = h.groupby("팀").agg(신규인원=("인원", "sum"), 신규인건비=("신규인건비", "sum")).reset_index()
+        else:
+            hire_team = pd.DataFrame(columns=["팀", "신규인원", "신규인건비"])
+
+        st.markdown("**3) 신규 투자 계획** — 금액(만원)과 내용연수를 넣으면 그해 감가상각비가 계산돼요")
+        inv0 = pd.DataFrame({"투자항목": ["예: 신규 매장 인테리어"], "팀": [hr["팀"].iloc[0]], "투자금액(만원)": [10000],
+                             "투자월": [3], "내용연수(년)": [5], "구분": ["자산(감가상각)"], "비고": [""]})
+        inv = st.data_editor(inv0, num_rows="dynamic", hide_index=True, width="stretch", key="pl_inv",
+                             column_config={"팀": st.column_config.SelectboxColumn(options=sorted(hr["팀"].unique()) + ["공통"]),
+                                            "구분": st.column_config.SelectboxColumn(options=["자산(감가상각)", "비용(일시)"]),
+                                            "투자월": st.column_config.NumberColumn(min_value=1, max_value=12, step=1),
+                                            "내용연수(년)": st.column_config.NumberColumn(min_value=1, max_value=30, step=1)})
+        iv = inv.dropna(subset=["투자항목"]).copy()
+        if not iv.empty:
+            iv["투자금액(만원)"] = pd.to_numeric(iv["투자금액(만원)"], errors="coerce").fillna(0)
+            iv["사용개월"] = 13 - pd.to_numeric(iv["투자월"], errors="coerce").fillna(1).clip(1, 12)
+            yrs = pd.to_numeric(iv["내용연수(년)"], errors="coerce").fillna(5).clip(1, 30)
+            iv["연간비용"] = ((iv["투자금액(만원)"] / yrs * iv["사용개월"] / 12).where(
+                iv["구분"] == "자산(감가상각)", iv["투자금액(만원)"])).round(0)
+            inv_team = iv.groupby("팀").agg(투자액=("투자금액(만원)", "sum"), 투자비용=("연간비용", "sum")).reset_index()
+        else:
+            inv_team = pd.DataFrame(columns=["팀", "투자액", "투자비용"])
+
+        plan = cur_team.merge(hire_team, on="팀", how="outer").merge(inv_team, on="팀", how="outer").fillna(0)
+        plan["인건비합계"] = plan["기존인건비"] + plan["신규인건비"]
+        plan["총비용"] = plan["인건비합계"] + plan["투자비용"]
+        plan["인원합계"] = plan["현재인원"] + plan["신규인원"]
+        plan = plan[["팀", "현재인원", "신규인원", "인원합계", "현재FTE", "기존인건비", "신규인건비",
+                     "인건비합계", "투자액", "투자비용", "총비용"]].round(1)
+
+        st.markdown("**4) 결과**")
+        m = st.columns(4)
+        m[0].metric("인원 (현재 → 계획)", f'{int(plan["현재인원"].sum())} → {int(plan["인원합계"].sum())}명')
+        m[1].metric(f"{year_p}년 인건비", f'{plan["인건비합계"].sum()/10000:.2f}억원')
+        m[2].metric("신규 채용 인건비", f'{plan["신규인건비"].sum()/10000:.2f}억원')
+        m[3].metric("투자비용(당해 반영)", f'{plan["투자비용"].sum()/10000:.2f}억원')
+        st.dataframe(plan, width="stretch", hide_index=True,
+                     column_config={c: st.column_config.NumberColumn(format="%,.0f") for c in
+                                    ("기존인건비", "신규인건비", "인건비합계", "투자액", "투자비용", "총비용")})
+        st.caption("금액 단위: 만원 (지표 카드는 억원) · 인건비 = 연봉 × (1 + 부담률) · "
+                   "신규 채용은 입사월부터 12월까지 근무한 개월수만큼 반영 · "
+                   "자산 투자는 정액법 감가상각(내용연수·사용개월 반영), 비용(일시)은 전액 반영")
+        st.download_button("계획 CSV 받기", plan.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"인건비_투자계획_{year_p}.csv")
+        with st.expander("현재 인원 명단 보기"):
+            st.dataframe(cur[["팀", "이름", "직책", "직급", "FTE", "연봉(만원)"]], width="stretch", hide_index=True)
 
 # ================= 엑셀 (헤더 버튼) =================
 raw_x = long.assign(분기=qname) if not long.empty else long
