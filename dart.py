@@ -255,7 +255,10 @@ def _allowance_from_doc(xml_text):
 
 # 주석 표에서 찾을 때 쓰는 말 (회사마다 용어가 달라서 여러 표현을 인정)
 #   재고자산평가충당금, 평가손실충당금, 재고자산평가손실충당금, 평가충당금, 손실충당금, 평가손실누계(액), 평가감 등
-_ALLOW_WORDS = __import__("re").compile(r"충당금|평가손실누계|평가손실|평가감|저가")
+_ALLOW_WORDS = __import__("re").compile(r"평가충당금|평가손실충당금|평가손실누계|평가손실|평가감|저가|충당금")
+_NOT_ALLOW = __import__("re").compile(r"대손|매출채권|채권|금융자산|하자보수|판매보증|복구|마일리지|포인트|퇴직")
+_ALLOW_STRICT = __import__("re").compile(r"평가충당금|평가손실충당금|평가손실누계|평가감|저가법")
+_INV_WORDS = __import__("re").compile(r"재고|상품|제품|재공품|원재료|부재료|미착품|저장품")
 _TABLE = __import__("re").compile(r"<TABLE\b.*?</TABLE>", __import__("re").S | __import__("re").I)
 _ROW = __import__("re").compile(r"<TR\b.*?</TR>", __import__("re").S | __import__("re").I)
 _CELL = __import__("re").compile(r"<(TD|TE|TH|TU)\b[^>]*>(.*?)</\1>", __import__("re").S | __import__("re").I)
@@ -276,42 +279,56 @@ def _cell_num(s):
 
 
 def _allowance_from_tables(xml_text, net):
-    """XBRL 태그가 없는 회사용: 주석 표에서 '취득원가 − 충당금 = 장부금액'이 맞는 숫자를 찾음.
-    net: 재무상태표 재고자산(원). 단위(원·천원·백만원)와 연결/별도 구분은 이 금액과 맞춰서 판단."""
+    """XBRL 태그가 없는 회사용: 재고자산 주석 표에서 '취득원가 − 충당금 = 장부금액'이 맞는 숫자를 찾음.
+    net: 재무상태표 재고자산(원). 단위(원·천원·백만원)와 연결/별도 구분은 이 금액과 맞춰서 판단.
+    가로형(한 줄에 취득원가·충당금·장부금액)을 먼저 보고, 없을 때만 세로형(줄로 나뉜 표)을 봄."""
     if not net:
         return None
+    cands = []
     for tb in _TABLE.findall(xml_text):
-        if not _ALLOW_WORDS.search(tb):
-            continue
+        if not _ALLOW_WORDS.search(tb) or not _INV_WORDS.search(tb):
+            continue  # 재고자산 표가 아니면 건너뜀 (대손충당금 등 다른 표 제외)
         rows = []
         for tr in _ROW.findall(tb):
             cells = [c[1] for c in _CELL.findall(tr)]
             if cells:
                 rows.append((_TAG.sub("", cells[0]).replace(" ", ""), [_cell_num(c) for c in cells]))
+        if rows:
+            cands.append(rows)
+
+    def units(unit):
+        target = net / unit
+        return target, max(2.0, abs(target) * 0.001)
+
+    # 1) 가로형
+    for rows in cands:
         for unit in (1, 1_000, 1_000_000):
-            target = net / unit
-            tol = max(2.0, abs(target) * 0.001)
-            ok = lambda v: v is not None and abs(v - target) <= tol
-            # (가) 가로형: 한 줄에 [취득원가, (충당금), 장부금액]이 이어서 나옴
+            target, tol = units(unit)
             for label, nums in rows:
+                if _NOT_ALLOW.search(label):
+                    continue
                 for i in range(len(nums) - 2):
                     g, a, n = nums[i], nums[i + 1], nums[i + 2]
-                    if None in (g, a, n) or not ok(n) or g <= 0:
+                    if None in (g, a, n) or g <= 0 or abs(n - target) > tol:
                         continue
-                    if abs(g - abs(a) - n) <= tol and abs(a) > 0:
+                    if abs(a) > 0 and abs(g - abs(a) - n) <= tol:
                         return abs(a) * unit
                     if abs(a) == 0 and abs(g - n) <= tol:
                         return 0.0
-            # (나) 세로형: '충당금' 줄과 '합계/장부금액' 줄이 따로 있음 → 같은 칸끼리 맞춤
-            allow_rows = [nums for label, nums in rows if _ALLOW_WORDS.search(label)]
-            for nums_a in allow_rows:
+    # 2) 세로형 ('충당금' 줄과 '취득원가·장부금액' 줄이 따로 있는 표)
+    for rows in cands:
+        for unit in (1, 1_000, 1_000_000):
+            target, tol = units(unit)
+            for label_a, nums_a in rows:
+                if not _ALLOW_WORDS.search(label_a) or _NOT_ALLOW.search(label_a):
+                    continue
                 for j, a in enumerate(nums_a):
                     if a is None or a == 0:
                         continue
                     col = [r[j] for _, r in rows if j < len(r) and r[j] is not None and r is not nums_a]
-                    has_net = any(ok(v) for v in col)                                # 장부금액 줄
-                    has_gross = any(abs(v - abs(a) - target) <= tol for v in col)    # 취득원가 줄
-                    if has_net and has_gross:
+                    has_net = any(abs(v - target) <= tol for v in col)        # 장부금액 줄
+                    has_gross = any(abs(v - abs(a) - target) <= tol for v in col)  # 취득원가 줄
+                    if has_net and (has_gross or _ALLOW_STRICT.search(label_a)):
                         return abs(a) * unit
     return None
 
@@ -491,21 +508,18 @@ AMOUNTS = ["매출액", "매출총이익", "영업이익", "당기순이익", "�
            "설비투자(CAPEX)", "잉여현금흐름(FCF)"]
 
 
-def inv_turn_ttm(key, corp_code, year, q, fs="연결"):
-    """분기 재고자산회전율 (최근 4개 분기 합산)
-    = 최근 4개 분기 매출원가 합계 ÷ (1년 전 같은 분기말 재고 + 이번 분기말 재고) / 2
-    최근 4개 분기 매출원가 = 올해 누적 + 전년 연간 − 전년 같은 분기 누적 (4Q는 올해 연간)"""
-    cur = period_cum(key, corp_code, year, q, fs)
-    prev_same = period_cum(key, corp_code, year - 1, q, fs)
-    if not cur or not prev_same:
+def inv_turn_q(key, corp_code, year, q, fs="연결"):
+    """분기 재고자산회전율
+    = (연초부터 누적 매출원가 × 4/분기수) ÷ (전기말 재고자산 + 당분기말 재고자산) / 2
+    예) 2분기 → 반기 누적 매출원가 × 2 ÷ (전기말·2분기말 재고 평균)"""
+    cur = period_cum(key, corp_code, year, q, fs)      # 연초부터 누적 (q=4면 연간)
+    prev = period_cum(key, corp_code, year - 1, 4, fs)  # 전기말 재무상태
+    if not cur or not prev:
         return None
-    if q == 4:
-        cogs = cur[0].get("매출원가")
-    else:
-        prev_ann = period_cum(key, corp_code, year - 1, 4, fs)
-        a, b, c = cur[0].get("매출원가"), (prev_ann or [{}])[0].get("매출원가"), prev_same[0].get("매출원가")
-        cogs = None if None in (a, b, c) else a + b - c
-    return _div(cogs, _avg(cur[0].get("재고자산"), prev_same[0].get("재고자산")), pct=False)
+    cogs = cur[0].get("매출원가")
+    if cogs is None:
+        return None
+    return _div(cogs * (4 / q), _avg(cur[0].get("재고자산"), prev[0].get("재고자산")), pct=False)
 
 
 def financials(key, corp_code, years, q=0, fs="연결"):
@@ -518,8 +532,8 @@ def financials(key, corp_code, years, q=0, fs="연결"):
         yoy, _ = period_values(key, corp_code, y - 1, q, fs)
         begin = begin_balance(key, corp_code, y, q, fs)
         r = ratios(cur, begin, yoy or {}, 1 if q == 0 else 4)
-        if q:  # 분기: 재고자산회전율은 최근 4개 분기 합산(TTM) 방식
-            it = inv_turn_ttm(key, corp_code, y, q, fs)
+        if q:  # 분기: 재고자산회전율은 누적 매출원가 연환산 ÷ 평균재고
+            it = inv_turn_q(key, corp_code, y, q, fs)
             r["재고자산회전율(회)"] = it
             r["재고자산회전일수(일)"] = round(365 / it, 1) if it else None
         rows.append({"연도": int(y), "기준": label, **cur, **r})
@@ -619,7 +633,7 @@ DESC = {
     "차입금의존도(%)": "차입금 ÷ 자산총계 × 100\n(차입금 = '차입금'·'사채' 계정 합계, 리스부채 제외 · 근사치)",
     "이자보상배율(배)": "영업이익 ÷ 금융비용\n(금융비용에 이자 외 항목이 섞일 수 있어 근사치)",
     "총자산회전율(회)": "매출액 ÷ 평균 자산총계",
-    "재고자산회전율(회)": "매출원가 ÷ 평균 재고자산\n연간: 기초·기말 평균\n분기: 최근 4개 분기 매출원가 합계 ÷ (1년 전 같은 분기말·이번 분기말 재고 평균)\n매출원가가 없는 회사는 표시 안 함",
+    "재고자산회전율(회)": "매출원가 ÷ 평균 재고자산\n연간: 기초·기말 평균\n분기: 연초부터 누적 매출원가 × (4÷분기수) ÷ (전기말·당분기말 재고 평균)\n예) 2분기 = 반기 누적 매출원가 × 2 ÷ 평균재고\n매출원가가 없는 회사는 표시 안 함",
     "재고자산회전일수(일)": "365 ÷ 재고자산회전율",
     "재고자산충당금설정률(%)": "재고자산평가충당금 ÷ 충당금 차감 전 재고자산 총액 × 100\n(총액 = 재무상태표 재고자산 + 평가충당금)\n충당금은 보고서 주석(재고자산)의 XBRL 태그에서 읽음 · 기간 말 기준\n주석에 충당금 표시가 없으면 빈칸",
     "매출채권회전율(회)": "매출액 ÷ 평균 매출채권",

@@ -528,9 +528,9 @@ with tabs[0]:
                       if val_src and "KRX" not in val_src else "")
                    + " · 지표의 ? 에 마우스를 올리면 계산 방법이 보여요")
         if q and any(k in chosen for k in ("재고자산회전율(회)", "재고자산회전일수(일)")):
-            st.info("재고자산회전율(분기) 환산 방법: 최근 4개 분기 매출원가 합계 ÷ 평균 재고자산 "
-                    "(1년 전 같은 분기말 재고와 이번 분기말 재고의 평균). "
-                    "최근 4개 분기 매출원가 = 올해 누적 + 전년 연간 − 전년 같은 분기 누적 (4Q는 올해 연간 값).", icon="ℹ️")
+            st.info("재고자산회전율(분기) 환산 방법: 연초부터 누적 매출원가 × (4 ÷ 분기수) ÷ 평균 재고자산 "
+                    "(전기말 재고와 당분기말 재고의 평균). "
+                    "예) 2분기 = 반기 누적 매출원가 × 2 ÷ (전기말·2분기말 재고 평균).", icon="ℹ️")
         mk = {l.split(" (")[0]: market_of(key, lab2code[l]) for l in data}
         st.markdown(html_table(rows, list(snap.index), mk), unsafe_allow_html=True)
         if fs == "연결" and "기준" in snap:
