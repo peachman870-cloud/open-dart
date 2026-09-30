@@ -378,10 +378,11 @@ def _allowance_from_tables(xml_text, net):
 
 def inventory_allowance(key, corp_code, year, reprt_code, fs_label, net_inventory=None):
     """재고자산평가충당금(원). 원문(document.xml)을 한 번만 받아 결과를 조회 캐시에 저장"""
-    ck = ("allowance2", (("corp_code", corp_code), ("bsns_year", str(year)), ("reprt_code", reprt_code),
+    # 계산 방식이 바뀌면 뒤 번호를 올려서 예전에 저장된 값을 쓰지 않게 함
+    ck = ("allowance3", (("corp_code", corp_code), ("bsns_year", str(year)), ("reprt_code", reprt_code),
                          ("fs", fs_label), ("inv", round(net_inventory or 0))))
     hit = _api_cache.get(ck)
-    if hit is None or time.time() - hit[0] > API_TTL * 4 * 30:
+    if hit is None or time.time() - hit[0] > API_TTL * 4 * 7:  # 약 7일
         rno = report_rcept_no(key, corp_code, year, reprt_code)
         res = {}
         if rno:

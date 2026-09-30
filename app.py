@@ -472,8 +472,11 @@ if any(k in chosen for k in VAL_KEYS):
 ALLOW_KEY = "재고자산충당금설정률(%)"
 
 
-@st.cache_data(ttl=86400 * 7, show_spinner=False)
-def allowance_for(key, corp_code, year, reprt_code, fs_label, net_inv):
+ALLOW_VER = 3  # 계산 방식이 바뀌면 숫자를 올려 예전 결과를 다시 쓰지 않게 함
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def allowance_for(key, corp_code, year, reprt_code, fs_label, net_inv, ver=ALLOW_VER):
     return dart.inventory_allowance(key, corp_code, year, reprt_code, fs_label, net_inv)
 
 
