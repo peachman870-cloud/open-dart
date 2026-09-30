@@ -233,23 +233,66 @@ _TE = __import__("re").compile(r"<TE\b([^>]*)>([^<]*)</TE>", __import__("re").I)
 _ATTR = __import__("re").compile(r'(\w+)="([^"]*)"')
 
 
-def _allowance_from_doc(xml_text):
-    """공시 원문에서 재고자산평가충당금 합계(원). {'연결': 값, '별도': 값, '': 값(구분 없음)}"""
-    out = {}
+def _allowance_from_doc(xml_text, net=None, want=None):
+    """공시 원문의 XBRL 태그에서 재고자산평가충당금 합계(원).
+    금액 단위(원·천원·백만원)는 회사마다 다르고 ADECIMAL이 틀린 경우도 있어서,
+    같은 표의 '장부금액 합계' 태그를 재무상태표 재고자산(net)과 맞춰 단위를 정함.
+    반환: {'연결': 값, '별도': 값, '': 값(구분 없는 회사)}"""
+    items = []
     for attrs, val in _TE.findall(xml_text):
         a = dict(_ATTR.findall(attrs))
-        ctx = a.get("ACONTEXT", "")
-        if a.get("ACODE") != "ifrs-full_Inventories" or "AllowanceForInventoryValuation" not in ctx:
+        if a.get("ACODE") != "ifrs-full_Inventories":
             continue
+        ctx = a.get("ACONTEXT", "")
         if not ctx.startswith("C"):  # C = 당기(말), P = 전기
             continue
         v = _num(val)
         if v is None:
             continue
-        dec = int(a.get("ADECIMAL") or 0)
-        v = abs(v) * (10 ** -dec if dec < 0 else 1)
         kind = "연결" if "ConsolidatedMember" in ctx else "별도" if "SeparateMember" in ctx else ""
-        out.setdefault(kind, v)
+        if "AllowanceForInventoryValuation" in ctx:
+            role = "allow"
+        elif "GrossCarryingAmount" in ctx:
+            role = "gross"
+        elif "Member" in ctx.replace("ConsolidatedMember", "").replace("SeparateMember", ""):
+            continue  # 다른 구분축(사업부문 등)은 제외
+        else:
+            role = "net"
+        items.append((kind, role, abs(v), int(a.get("ADECIMAL") or 0)))
+
+    out = {}
+    for kind in {i[0] for i in items}:
+        if want is not None and kind not in (want, ""):
+            continue
+        allows = [x for k, r, x, d in items if k == kind and r == "allow"]
+        nets = [x for k, r, x, d in items if k == kind and r == "net"]
+        grosses = [x for k, r, x, d in items if k == kind and r == "gross"]
+        decs = [d for k, r, x, d in items if k == kind and r == "allow"]
+        if not allows:
+            continue
+        a = max(allows)
+        unit = None
+        # 1) 취득원가 − 충당금 = 장부금액 이 맞는 조합을 찾아 같은 단위의 장부금액을 확인
+        for g in grosses:
+            for n in nets:
+                if n > 0 and abs(g - a - n) <= max(1.0, n * 0.002):
+                    if net:
+                        for u in (1, 1_000, 1_000_000):
+                            if abs(n * u - net) <= max(1.0, net * 0.005):
+                                unit = u
+                                break
+                    break
+            if unit:
+                break
+        # 2) 못 찾으면 ADECIMAL 사용 (-3 = 천원, -6 = 백만원)
+        if unit is None:
+            d = decs[0] if decs else 0
+            unit = 10 ** -d if d < 0 else 1
+            if net and unit == 1:  # ADECIMAL이 0인데 금액이 너무 작으면 단위 보정
+                for u in (1, 1_000, 1_000_000):
+                    if 0 < a * u <= net * 3:
+                        unit = u
+        out[kind] = a * unit
     return out
 
 
@@ -356,7 +399,7 @@ def inventory_allowance(key, corp_code, year, reprt_code, fs_label, net_inventor
                 txt = raw.decode("utf-8")
             except UnicodeDecodeError:
                 txt = raw.decode("cp949", errors="ignore")
-            res = _allowance_from_doc(txt)  # 1순위: XBRL 태그 (대형사)
+            res = _allowance_from_doc(txt, net_inventory, fs_label)  # 1순위: XBRL 태그 (대형사)
             if res.get(fs_label, res.get("")) is None:  # 2순위: 주석 표 숫자 맞추기 (용어가 달라도 됨)
                 v = _allowance_from_tables(txt, net_inventory)
                 if v is not None:
